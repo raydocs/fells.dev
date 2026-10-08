@@ -1,3 +1,4 @@
+import { trackCoverage } from '../helpers/browser.mjs';
 import test, { before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
@@ -7,7 +8,7 @@ import { chromium } from 'playwright';
 
 // Exercise the production build, with the repository's static response headers.
 // No running dev server or real account/payment endpoint is required.
-const dist = resolve('dist');
+const dist = resolve(process.env.TEST_DIST_DIR || 'dist');
 let server, browser, base;
 const mime = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.webp': 'image/webp', '.json': 'application/json' };
 before(async () => {
@@ -30,6 +31,7 @@ after(async () => { await browser?.close(); if (server) await new Promise(r => s
 
 async function setup(t, options = {}) {
   const context = await browser.newContext({ reducedMotion: 'reduce', ...options });
+  await trackCoverage(context, options);
   t.after(() => context.close());
   const errors = [];
   context.on('page', p => p.on('pageerror', e => errors.push(e.message)));
@@ -83,7 +85,7 @@ async function overwrite(page, value) {
 async function environment(page) {
   await go(page, 'ws-settings/1');
   await page.locator('[data-form=env] [name=k]').fill('DUMMY_TOKEN');
-  await page.locator('[data-form=env] [name=v]').fill('TEST-SECRET-DO-NOT-PERSIST');
+  await page.locator('[data-form=env] [data-env-value]').fill('TEST-SECRET-DO-NOT-PERSIST');
   await page.locator('[data-form=env] button').click();
   assert.equal(await page.locator('[data-act=env-del]').count(), 1);
 }

@@ -93,7 +93,6 @@
   .hero .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
   .hero .btn-link { color: var(--hero-ink); }
   .count { color: var(--hero-ink-2); font-size: 13.5px; margin: 18px 0 0; }
-  .count b { font-weight: 600; color: var(--hero-ink); }
 
   /* Product window (pure HTML mock) */
   .win { margin-top: 44px; border-radius: 14px; overflow: hidden; background: var(--ink); color: #e8e6e1; border: 1px solid #2b2b30;
@@ -550,8 +549,13 @@
     matchMedia("(min-width: 721px)").addEventListener("change", (e) => { if (e.matches) closeMenu(); });
 
     // Reveal
-    const io = new IntersectionObserver((es) => es.forEach((e) => { if (e.isIntersecting) { e.target.classList.add("in"); io.unobserve(e.target); } }), { rootMargin: "0px 0px -8% 0px" });
-    $$(".rv").forEach((el) => io.observe(el));
+    try {
+      const io = new IntersectionObserver((es) => es.forEach((e) => { if (e.isIntersecting) { e.target.classList.add("in"); io.unobserve(e.target); } }), { rootMargin: "0px 0px -8% 0px" });
+      $$(".rv").forEach((el) => io.observe(el));
+    } catch {
+      // Decoration must not hide content or prevent sharing and navigation.
+      $$(".rv").forEach((el) => el.classList.add("in"));
+    }
 
     // Testimonials marquee (placeholder data)
     const people = [

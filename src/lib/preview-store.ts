@@ -49,7 +49,7 @@ async function transaction<T>(mode: IDBTransactionMode, run: (store: IDBObjectSt
   } finally { db.close(); }
 }
 
-export function notifyPreview() {
+function notifyPreview() {
   if (typeof BroadcastChannel === "undefined") return;
   // A best-effort UI notification must not turn a committed write into a
   // reported failure (some browser policies disable this API).
@@ -64,7 +64,17 @@ export function notifyPreview() {
 export async function beginPreview(email: string, bonus: number): Promise<Snapshot> {
   removeLegacyStorage();
   const next = { session: crypto.randomUUID(), revision: 0, state: validateState({ ...freshState(bonus), email }) };
-  await transaction("readwrite", store => { store.put(next, "active"); });
+  await transaction("readwrite", (store, previous) => {
+    // Customer support belongs to this preview session. Keep fictional support
+    // demos separate so an account switch cannot expose the previous customer.
+    store.delete("support.user");
+    const oldSession = (previous as Snapshot | undefined)?.session;
+    if (typeof oldSession === "string" && /^[\w-]{36}$/.test(oldSession)) {
+      store.delete(`support.typing.user.user-${oldSession}`);
+      store.delete(`support.typing.agent.user-${oldSession}`);
+    }
+    store.put(next, "active");
+  });
   notifyPreview();
   return next;
 }
@@ -92,7 +102,12 @@ export async function endPreview(session: string): Promise<void> {
   await transaction("readwrite", (store, value) => {
     // A stale page must never delete a newer user's session. Deletion does not
     // serialize chat data, so a large draft cannot block logout.
-    if (value && (value as Snapshot).session === session) store.delete("active");
+    if (value && (value as Snapshot).session === session) {
+      store.delete("support.user");
+      store.delete(`support.typing.user.user-${session}`);
+      store.delete(`support.typing.agent.user-${session}`);
+      store.delete("active");
+    }
   });
   notifyPreview();
 }
