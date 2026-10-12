@@ -1,0 +1,266 @@
+---
+// /checkout — the site's purchase entry. Plan "Choose" buttons link here with
+// ?product=claude&tier=2&period=annual; the credits tab is ?mode=credits.
+// No payments backend: "pay" hands off to site.checkoutUrl, or to the waitlist while it is empty.
+import type { Dict } from "../../i18n/en";
+import { pagesOf, link } from "../../i18n/index";
+import { products, annualMonthly } from "../../data/catalog";
+import { site } from "../../site";
+import Layout from "../../layouts/Layout.astro";
+import PromoBar from "../PromoBar.astro";
+import Nav from "../Nav.astro";
+import Footer from "../Footer.astro";
+interface Props { t: Dict }
+const { t } = Astro.props;
+const c = pagesOf(t).checkout;
+const slug = "checkout";
+const amounts = [10, 25, 50, 100];
+const catalog = products.map((p) => ({ id: p.id, name: p.name, hue: p.hue, tiers: p.tiers.map((x) => ({ mult: x.mult, monthly: x.monthly, annual: annualMonthly(x.monthly) })) }));
+---
+<Layout t={t} slug={slug} title={c.metaTitle} description={c.sub}>
+  <PromoBar t={t} />
+  <Nav t={t} slug={slug} />
+  <main class="section co">
+    <div class="wrap">
+      <a class="back" href={link(t) + "#plans"}>← {c.back}</a>
+      <span class="kicker">{c.kicker}</span>
+      <h1 class="h2">{c.title}</h1>
+      <p class="lead">{c.sub}</p>
+
+      <form class="grid" data-checkout data-catalog={JSON.stringify(catalog)} data-pay={site.checkoutUrl} data-wait={site.waitlistEndpoint}
+        data-mail={site.contactEmail} data-not-open={c.notOpen} data-per-year={c.perYear} data-per-month={c.perMonth} data-credits-label={c.tabCredits} data-monthly={c.monthly} data-annual={c.annual}>
+        <div class="pick">
+          <div class="seg" role="tablist">
+            <button type="button" role="tab" aria-selected="true" data-mode="plan">{c.tabPlan}</button>
+            <button type="button" role="tab" aria-selected="false" data-mode="credits">{c.tabCredits}</button>
+          </div>
+
+          <fieldset data-pane="plan">
+            <legend>{c.product}</legend>
+            <div class="opts two">
+              {products.map((p, i) => (
+                <label class="opt" style={`--hue:${p.hue}`}><input type="radio" name="product" value={p.id} checked={i === 0} /><span><i class="dot"></i><b>{p.name}</b><small>{p.headline}</small></span></label>
+              ))}
+            </div>
+            <legend>{c.tier}</legend>
+            <div class="opts four">
+              {products[0].tiers.map((x, i) => (
+                <label class="opt"><input type="radio" name="tier" value={i} checked={x.badge === "popular"} /><span><b>{x.mult}</b><small data-tier-price={i}>${annualMonthly(x.monthly)}{c.perMonth}</small></span></label>
+              ))}
+            </div>
+            <legend>{c.period}</legend>
+            <div class="opts two">
+              <label class="opt"><input type="radio" name="period" value="monthly" /><span><b>{c.monthly}</b></span></label>
+              <label class="opt"><input type="radio" name="period" value="annual" checked /><span><b>{c.annual}</b></span></label>
+            </div>
+          </fieldset>
+
+          <fieldset data-pane="credits" hidden>
+            <legend>{c.amount}</legend>
+            <div class="opts four">
+              {amounts.map((a) => (
+                <label class="opt"><input type="radio" name="amount" value={a} checked={a === 25} /><span><b>${a}</b></span></label>
+              ))}
+            </div>
+            <label class="custom">{c.custom}<span>$</span><input type="number" name="custom" min="10" max="5000" step="5" inputmode="numeric" placeholder="—" /></label>
+            <p class="note">{c.minNote} {c.creditsNote}</p>
+          </fieldset>
+        </div>
+
+        <aside class="sum">
+          <h2>{c.summary}</h2>
+          <p class="item" data-item>—</p>
+          <dl>
+            <div><dt>{c.subtotal}</dt><dd data-subtotal>—</dd></div>
+            <div data-discount-row><dt>{c.discount}</dt><dd class="disc" data-discount>—</dd></div>
+            <div class="tot"><dt>{c.total}</dt><dd data-total>—</dd></div>
+          </dl>
+          <label class="email">{c.email}<input type="email" name="email" required autocomplete="email" placeholder={c.emailPh} /></label>
+          <label class="email">{c.reward}<input type="text" name="code" autocomplete="off" spellcheck="false" maxlength="9" placeholder="XXXX-XXXX" pattern="[A-Za-z0-9]{4}-?[A-Za-z0-9]{4}" /></label>
+          <p class="fine">{c.rewardNote}</p>
+          <fieldset class="method">
+            <legend>{c.method}</legend>
+            <div class="opts">
+              <label class="opt"><input type="radio" name="method" value="alipay" checked /><span class="row"><b>{c.alipay}</b><i class="mk ali">支</i></span></label>
+              <label class="opt"><input type="radio" name="method" value="card" /><span class="row"><b>{c.card}</b><i class="mk">VISA · MC · AMEX</i></span></label>
+            </div>
+          </fieldset>
+          <label class="agree"><input type="checkbox" name="agree" required /> {c.agree}</label>
+          <button class="btn btn-primary pay" type="submit">{c.pay}</button>
+          <p class="msg" data-msg role="status"></p>
+          <p class="fine">{c.noCharge} {c.payNote}</p>
+          <p class="fine">{c.refund}</p>
+          <ul class="sec">{c.secure.map((s) => <li>{s}</li>)}</ul>
+        </aside>
+      </form>
+    </div>
+  </main>
+  <Footer t={t} slug={slug} />
+</Layout>
+<style>
+  .co { padding-top: clamp(40px, 6vw, 72px); }
+  .back { display: block; width: fit-content; margin-bottom: 22px; color: var(--muted); font-size: 14px; }
+  .back:hover { color: var(--text); }
+  .grid { margin-top: 36px; display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr); gap: 20px; align-items: start; }
+  .pick, .sum { padding: clamp(20px, 3vw, 28px); border-radius: var(--radius-lg); border: 1px solid var(--line-2); background: linear-gradient(180deg, #11141a, #0b0d11); }
+  .seg { display: inline-flex; gap: 4px; padding: 4px; border-radius: 999px; border: 1px solid var(--line); background: rgba(0, 0, 0, 0.3); }
+  .seg button { border: 0; background: transparent; color: var(--muted); cursor: pointer; border-radius: 999px; padding: 8px 18px; font-size: 14px; font-weight: 550; }
+  .seg button[aria-selected="true"] { background: var(--text); color: #0b0d10; }
+  fieldset { border: 0; padding: 0; margin: 8px 0 0; min-width: 0; }
+  fieldset[hidden] { display: none; }
+  legend { float: left; width: 100%; margin: 22px 0 10px; font: 500 12px var(--mono); letter-spacing: 0.12em; text-transform: uppercase; color: var(--dim); }
+  .opts { clear: both; display: grid; gap: 10px; }
+  .two { grid-template-columns: 1fr 1fr; }
+  .four { grid-template-columns: repeat(4, 1fr); }
+  .opt { position: relative; cursor: pointer; }
+  .opt input { position: absolute; opacity: 0; pointer-events: none; }
+  .opt span { display: flex; flex-direction: column; gap: 4px; height: 100%; padding: 14px 16px; border-radius: 14px; border: 1px solid var(--line); background: rgba(255, 255, 255, 0.025); transition: border-color 0.2s, background 0.2s; }
+  .opt b { font-size: 15px; font-weight: 600; display: flex; align-items: center; gap: 8px; }
+  .opt small { color: var(--dim); font-size: 12.5px; }
+  .opt .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--hue); display: inline-block; margin-bottom: 2px; }
+  .opt:hover span { border-color: var(--line-2); }
+  .opt input:checked + span { border-color: var(--ember); background: rgba(224, 122, 85, 0.08); }
+  .opt input:focus-visible + span { outline: 2px solid var(--ember-2); outline-offset: 2px; }
+  .method legend { margin-top: 18px; }
+  .opt .row { flex-direction: row; align-items: center; justify-content: space-between; }
+  .mk { font: normal 600 11px var(--mono); color: var(--dim); }
+  .mk.ali { width: 22px; height: 22px; border-radius: 6px; display: grid; place-items: center; background: #1677ff; color: #fff; font-size: 13px; }
+  input[type="text"] { height: 44px; padding: 0 14px; border-radius: 12px; border: 1px solid var(--line-2); background: rgba(0, 0, 0, 0.35); color: var(--text); font: 15px var(--mono); letter-spacing: 0.08em; }
+  .custom { display: flex; align-items: center; gap: 10px; margin-top: 12px; color: var(--muted); font-size: 14px; }
+  .custom span { margin-left: auto; color: var(--dim); }
+  .custom input { width: 120px; }
+  input[type="number"], input[type="email"] { height: 44px; padding: 0 14px; border-radius: 12px; border: 1px solid var(--line-2); background: rgba(0, 0, 0, 0.35); color: var(--text); font: inherit; font-size: 15px; }
+  .note { margin: 14px 0 0; color: var(--dim); font-size: 13px; }
+  .sum { position: sticky; top: 96px; }
+  .sum h2 { margin: 0; font-size: 17px; font-weight: 600; }
+  .item { margin: 10px 0 0; color: var(--muted); font-size: 14.5px; }
+  dl { margin: 18px 0 0; padding: 16px 0; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); display: flex; flex-direction: column; gap: 10px; font-size: 14px; }
+  dl div { display: flex; justify-content: space-between; gap: 12px; }
+  dl div[hidden] { display: none; }
+  dt { color: var(--muted); }
+  dd { margin: 0; font-variant-numeric: tabular-nums; }
+  .disc { color: var(--moss); }
+  .tot { font-size: 17px; font-weight: 650; padding-top: 6px; }
+  .tot dt { color: var(--text); }
+  .email { display: flex; flex-direction: column; gap: 8px; margin-top: 20px; font-size: 13.5px; color: var(--muted); }
+  .agree { display: flex; gap: 10px; align-items: flex-start; margin-top: 14px; font-size: 13px; color: var(--muted); }
+  .agree input { margin-top: 2px; accent-color: var(--ember); }
+  .pay { width: 100%; height: 46px; margin-top: 18px; font-size: 15px; }
+  .msg { margin: 12px 0 0; font-size: 13.5px; color: var(--moss); }
+  .msg:empty { display: none; }
+  .fine { margin: 12px 0 0; font-size: 12px; color: var(--dim); }
+  .sec { list-style: none; padding: 0; margin: 16px 0 0; display: flex; flex-direction: column; gap: 8px; font-size: 13px; color: var(--muted); }
+  .sec li::before { content: "✓ "; color: var(--moss); }
+  @media (max-width: 900px) { .grid { grid-template-columns: 1fr; } .sum { position: static; } }
+  @media (max-width: 560px) { .four { grid-template-columns: 1fr 1fr; } }
+</style>
+<script>
+  type Tier = { mult: string; monthly: number; annual: number };
+  type Product = { id: string; name: string; tiers: Tier[] };
+  document.querySelectorAll<HTMLFormElement>("[data-checkout]").forEach((form) => {
+    const d = form.dataset;
+    const catalog: Product[] = JSON.parse(d.catalog ?? "[]");
+    const $ = <T extends HTMLElement>(s: string) => form.querySelector<T>(s)!;
+    const radio = (name: string) => form.querySelector<HTMLInputElement>(`input[name="${name}"]:checked`)?.value ?? "";
+    const setRadio = (name: string, value: string | null) => {
+      const el = value === null ? null : form.querySelector<HTMLInputElement>(`input[name="${name}"][value="${CSS.escape(value)}"]`);
+      if (el) el.checked = true;
+    };
+    let mode: "plan" | "credits" = "plan";
+    const money = (n: number) => `$${n.toLocaleString("en-US")}`;
+
+    const order = () => {
+      if (mode === "credits") {
+        const custom = Number(($<HTMLInputElement>('input[name="custom"]')).value);
+        // Top-ups: minimum $10, in multiples of $5.
+        const amount = custom >= 10 ? Math.min(5000, Math.round(custom / 5) * 5) : Number(radio("amount"));
+        return { sku: "credits", period: "once", amount, label: `${d.creditsLabel} · ${money(amount)}`, subtotal: amount, discount: 0 };
+      }
+      const p = catalog.find((x) => x.id === radio("product")) ?? catalog[0];
+      const i = Number(radio("tier")) || 0;
+      const tier = p.tiers[i];
+      const annual = radio("period") === "annual";
+      const subtotal = annual ? tier.monthly * 12 : tier.monthly;
+      const total = annual ? tier.annual * 12 : tier.monthly;
+      return {
+        sku: `${p.id}-${i + 1}`, period: annual ? "annual" : "monthly", amount: total,
+        label: `${p.name} ${tier.mult} · ${annual ? d.annual : d.monthly}`,
+        subtotal, discount: subtotal - total,
+      };
+    };
+
+    const render = () => {
+      const o = order();
+      const annual = radio("period") === "annual";
+      const p = catalog.find((x) => x.id === radio("product")) ?? catalog[0];
+      form.querySelectorAll<HTMLElement>("[data-tier-price]").forEach((el) => {
+        const tier = p.tiers[Number(el.dataset.tierPrice)];
+        el.textContent = `$${annual ? tier.annual : tier.monthly}${d.perMonth}`;
+      });
+      $("[data-item]").textContent = o.label;
+      $("[data-subtotal]").textContent = money(o.subtotal);
+      $("[data-discount]").textContent = `−${money(o.discount)}`;
+      $("[data-discount-row]").hidden = o.discount <= 0;
+      $("[data-total]").textContent = money(o.amount) + (o.period === "annual" ? d.perYear : o.period === "monthly" ? d.perMonth : "");
+      const q = new URLSearchParams(mode === "credits" ? { mode: "credits", amount: String(o.amount) } : { product: p.id, tier: radio("tier"), period: o.period });
+      history.replaceState(null, "", `${location.pathname}?${q}`);
+    };
+
+    const setMode = (m: "plan" | "credits") => {
+      mode = m;
+      form.querySelectorAll<HTMLElement>("[data-mode]").forEach((b) => b.setAttribute("aria-selected", String(b.dataset.mode === m)));
+      form.querySelectorAll<HTMLElement>("[data-pane]").forEach((el) => (el.hidden = el.dataset.pane !== m));
+      render();
+    };
+
+    // Preselect from the link that brought the visitor here.
+    const q = new URLSearchParams(location.search);
+    setRadio("product", q.get("product"));
+    setRadio("tier", q.get("tier"));
+    setRadio("period", q.get("period"));
+    if (q.get("amount")) {
+      const a = q.get("amount")!;
+      if (form.querySelector(`input[name="amount"][value="${CSS.escape(a)}"]`)) setRadio("amount", a);
+      else {
+        ($<HTMLInputElement>('input[name="custom"]')).value = a;
+        form.querySelectorAll<HTMLInputElement>('input[name="amount"]').forEach((r) => (r.checked = false));
+      }
+    }
+    form.querySelectorAll<HTMLElement>("[data-mode]").forEach((b) => b.addEventListener("click", () => setMode(b.dataset.mode as "plan" | "credits")));
+    form.addEventListener("change", (e) => {
+      const el = e.target as HTMLInputElement;
+      if (el.name === "amount") ($<HTMLInputElement>('input[name="custom"]')).value = "";
+      render();
+    });
+    form.addEventListener("input", (e) => {
+      const el = e.target as HTMLInputElement;
+      if (el.name !== "custom") return;
+      // A custom amount replaces the preset choice; clearing it restores the default preset.
+      form.querySelectorAll<HTMLInputElement>('input[name="amount"]').forEach((r) => (r.checked = !el.value && r.value === "25"));
+      render();
+    });
+    setMode(q.get("mode") === "credits" ? "credits" : "plan");
+
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const o = order();
+      const email = String(new FormData(form).get("email") ?? "");
+      if (d.pay) {
+        const fd = new FormData(form);
+        const fill: Record<string, string> = { sku: o.sku, period: o.period, amount: String(o.amount), email, method: String(fd.get("method") ?? ""), code: String(fd.get("code") ?? "").toUpperCase() };
+        location.href = d.pay.replace(/\{(\w+)\}/g, (_, k: string) => encodeURIComponent(fill[k] ?? ""));
+        return;
+      }
+      // Payments not open yet: record the order on the waitlist.
+      const summary = `${o.label} — ${money(o.amount)}`;
+      try {
+        if (!d.wait) throw new Error("no endpoint");
+        const res = await fetch(d.wait, { method: "POST", headers: { "content-type": "application/json", accept: "application/json" }, body: JSON.stringify({ email, order: o.sku, period: o.period, amount: o.amount }) });
+        if (!res.ok) throw new Error(String(res.status));
+        $("[data-msg]").textContent = (d.notOpen ?? "").replace("{email}", email);
+      } catch {
+        location.href = `mailto:${d.mail}?subject=${encodeURIComponent("Fells order")}&body=${encodeURIComponent(`${email}\n${summary}`)}`;
+      }
+    });
+  });
+</script>

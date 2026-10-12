@@ -1,0 +1,210 @@
+---
+import type { Dict } from "../i18n/en";
+import { products, annualMonthly, savePct, offPct } from "../data/catalog";
+import { fmtOff, link } from "../i18n/index";
+interface Props { t: Dict }
+const { t } = Astro.props;
+const { plans: p, ui } = t;
+---
+<section class="section" id="plans">
+  <div class="wrap">
+    <div class="reveal">
+      <span class="kicker">{p.kicker}</span>
+      <h2 class="h2">{p.title}</h2>
+      <p class="lead">{p.sub}</p>
+    </div>
+
+    <ol class="steps reveal">
+      {p.steps.map((s, i) => (
+        <li><span class="sn">{i + 1}</span><div><h3>{s.title}</h3><p>{s.body}</p></div></li>
+      ))}
+    </ol>
+
+    <div class="plans reveal" data-plans data-period="annual" data-product={products[0].id}>
+      <div class="controls">
+        <div>
+          <p class="rec">{p.recommended}</p>
+          <div class="seg product" role="tablist" aria-label={p.recommended}>
+            {products.map((pr, i) => (
+              <button type="button" role="tab" aria-selected={i === 0 ? "true" : "false"} data-set-product={pr.id} style={`--hue:${pr.hue}`}>
+                <span class="pdot"></span>{pr.name}
+              </button>
+            ))}
+          </div>
+          <p class="psub">{p.productSub}</p>
+        </div>
+        <div class="seg period" role="radiogroup" aria-label={ui.billingPeriod}>
+          <button type="button" role="radio" aria-checked="false" data-set-period="monthly">{p.monthly}</button>
+          <button type="button" role="radio" aria-checked="true" data-set-period="annual">{p.annual} <span class="save">{p.save}</span></button>
+        </div>
+      </div>
+
+      {products.map((pr) => (
+        <div class="tiers" data-product-panel={pr.id} hidden={pr.id !== products[0].id}>
+          {pr.tiers.map((tier, i) => {
+            const annual = annualMonthly(tier.monthly);
+            return (
+              <article class:list={["tier", tier.badge]} style={`--hue:${pr.hue}`}>
+                {tier.badge && <span class="flag">{tier.badge === "popular" ? p.popular : p.limited}</span>}
+                <header>
+                  <span class="pname">{pr.name}</span>
+                  <span class="mult">{tier.mult}</span>
+                  {tier.reference && (
+                    <span
+                      class="off"
+                      data-annual={fmtOff(t, offPct(annual, tier.reference))}
+                      data-monthly={offPct(tier.monthly, tier.reference) > 0 ? fmtOff(t, offPct(tier.monthly, tier.reference)) : ""}
+                    >{fmtOff(t, offPct(annual, tier.reference))}</span>
+                  )}
+                </header>
+                <p class="use">{p.tierUse[i]}</p>
+                <div class="price">
+                  <span class="cur">$</span>
+                  <span class="amt" data-annual={annual} data-monthly={tier.monthly}>{annual}</span>
+                  <span class="per">{p.perMonth}</span>
+                  <span class="billed" data-annual={p.billedAnnually} data-monthly={p.billedMonthly}>{p.billedAnnually}</span>
+                </div>
+                <p class="ref">{tier.reference ? <>{p.reference} <s>${tier.reference}</s></> : <>&nbsp;</>}</p>
+                {tier.badge === "limited" && <p class="soldout">{p.sellingOut}</p>}
+                <a class:list={["btn", tier.badge ? "btn-primary" : "btn-ghost", "choose"]} href={`${link(t, "checkout")}?product=${pr.id}&tier=${i}&period=annual`}>{p.choose} {tier.mult}</a>
+                <dl class="meta">
+                  <div><dt>{pr.headline}</dt><dd class="avail">{p.available}</dd></div>
+                  <div><dt>{p.allowance}</dt><dd><b>{tier.mult}</b> {pr.basedOn}</dd></div>
+                  <div class="saving">
+                    <dt>{p.youSave}</dt>
+                    <dd><b class="pct" data-annual={savePct(annual, tier.apiValue)} data-monthly={savePct(tier.monthly, tier.apiValue)}>{savePct(annual, tier.apiValue)}%</b></dd>
+                    <small>{p.vsApi} ${tier.apiValue.toLocaleString("en-US")}{p.perMonth}</small>
+                  </div>
+                </dl>
+              </article>
+            );
+          })}
+        </div>
+      ))}
+
+      <details class="benefits">
+        <summary>{p.benefitsTitle}<span aria-hidden="true">+</span></summary>
+        <ul>{p.benefits.map((b) => <li>{b}</li>)}</ul>
+      </details>
+    </div>
+  </div>
+</section>
+
+<style>
+  .steps { list-style: none; padding: 0; margin: 48px 0 0; display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+  .steps li { display: flex; gap: 16px; padding: 22px; border-radius: var(--radius); border: 1px solid var(--line); background: var(--panel); }
+  .sn { flex: none; width: 30px; height: 30px; border-radius: 10px; display: grid; place-items: center; font: 600 13px var(--mono); background: rgba(224, 122, 85, 0.14); color: var(--ember-2); }
+  .steps h3 { margin: 2px 0 6px; font-size: 16.5px; font-weight: 600; }
+  .steps p { margin: 0; color: var(--muted); font-size: 14.5px; }
+
+  .plans { margin-top: 32px; padding: clamp(20px, 3vw, 32px); border-radius: var(--radius-lg); border: 1px solid var(--line-2); background: linear-gradient(180deg, #11141a, #0b0d11); }
+  .controls { display: flex; justify-content: space-between; align-items: flex-end; gap: 20px; flex-wrap: wrap; margin-bottom: 24px; }
+  .rec { margin: 0 0 10px; font: 500 12px var(--mono); letter-spacing: 0.12em; text-transform: uppercase; color: var(--dim); }
+  .psub { margin: 10px 0 0; color: var(--dim); font-size: 13.5px; }
+  .seg { display: inline-flex; gap: 4px; padding: 4px; border-radius: 999px; border: 1px solid var(--line); background: rgba(0, 0, 0, 0.3); }
+  .seg button {
+    border: 0; background: transparent; color: var(--muted); cursor: pointer; border-radius: 999px;
+    padding: 8px 16px; font-size: 14px; font-weight: 550; display: inline-flex; align-items: center; gap: 8px;
+    transition: background 0.25s, color 0.25s;
+  }
+  .seg button[aria-selected="true"], .seg button[aria-checked="true"] { background: var(--text); color: #0b0d10; }
+  .pdot { width: 8px; height: 8px; border-radius: 50%; background: var(--hue); }
+  .save { font-size: 11.5px; padding: 2px 7px; border-radius: 999px; background: rgba(134, 214, 173, 0.2); color: var(--moss); }
+  .seg button[aria-checked="true"] .save { background: #1f7a52; color: #fff; }
+
+  .tiers { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+  .tiers[hidden] { display: none; }
+  .tier {
+    position: relative; display: flex; flex-direction: column; padding: 22px; border-radius: 20px;
+    border: 1px solid var(--line); background: rgba(255, 255, 255, 0.025);
+  }
+  .tier.popular { border-color: color-mix(in oklab, var(--hue) 55%, transparent); background: radial-gradient(120% 60% at 50% 0%, color-mix(in oklab, var(--hue) 14%, transparent), transparent 70%), rgba(255, 255, 255, 0.03); }
+  .tier.limited { border-color: rgba(254, 188, 46, 0.35); }
+  /* Rotating light around the most popular tier. */
+  @property --spin { syntax: "<angle>"; inherits: false; initial-value: 0deg; }
+  .tier.popular::before {
+    content: ""; position: absolute; inset: -1px; border-radius: inherit; padding: 1px; pointer-events: none;
+    background: conic-gradient(from var(--spin), transparent 0 60%, var(--hue) 75%, #ffd9c4 80%, transparent 90%);
+    -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+    -webkit-mask-composite: xor; mask-composite: exclude;
+    animation: spin-border 5s linear infinite;
+  }
+  @keyframes spin-border { to { --spin: 360deg; } }
+  .flag { position: absolute; top: -11px; left: 20px; font-size: 11.5px; font-weight: 600; padding: 3px 10px; border-radius: 999px; background: var(--hue); color: #fff; }
+  .limited .flag { background: #febc2e; color: #1a1300; }
+  header { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .pname { font-size: 13.5px; color: var(--muted); }
+  .mult { font-size: 20px; font-weight: 700; letter-spacing: -0.02em; }
+  .off { margin-left: auto; font: 600 11px var(--mono); padding: 3px 8px; border-radius: 6px; background: rgba(224, 122, 85, 0.16); color: var(--ember-2); }
+  .use { margin: 8px 0 0; color: var(--dim); font-size: 13.5px; min-height: 2.9em; }
+  .price { display: flex; align-items: baseline; gap: 2px; margin-top: 14px; flex-wrap: wrap; }
+  .cur { font-size: 20px; color: var(--muted); align-self: flex-start; margin-top: 6px; }
+  .amt { font-size: 46px; font-weight: 700; letter-spacing: -0.04em; line-height: 1; font-variant-numeric: tabular-nums; }
+  .per { color: var(--muted); font-size: 14px; margin-left: 2px; }
+  .billed { width: 100%; font-size: 12px; color: var(--dim); margin-top: 4px; }
+  .ref { margin: 4px 0 0; font-size: 12.5px; color: var(--dim); }
+  .ref s { color: var(--muted); }
+  .soldout { margin: 10px 0 0; font-size: 12px; line-height: 1.5; color: #f4cf75; padding: 8px 10px; border-radius: 10px; background: rgba(254, 188, 46, 0.08); }
+  .choose { margin-top: 16px; width: 100%; height: 42px; font-size: 14px; }
+  .meta { margin: 18px 0 0; display: flex; flex-direction: column; gap: 10px; font-size: 13px; border-top: 1px solid var(--line); padding-top: 16px; }
+  .meta div { display: flex; justify-content: space-between; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+  dt { color: var(--muted); }
+  dd { margin: 0; color: var(--text); }
+  .avail { color: var(--moss); font-size: 12px; }
+  .saving small { width: 100%; color: var(--dim); font-size: 11.5px; }
+  .pct { font-size: 18px; color: var(--moss); }
+
+  .benefits { margin-top: 20px; border-top: 1px solid var(--line); }
+  .benefits summary { list-style: none; cursor: pointer; display: flex; justify-content: space-between; padding: 18px 2px 4px; font-weight: 550; }
+  .benefits summary::-webkit-details-marker { display: none; }
+  .benefits[open] summary span { transform: rotate(45deg); }
+  .benefits summary span { transition: transform 0.25s; font-size: 20px; line-height: 1; color: var(--muted); }
+  .benefits ul { list-style: none; padding: 12px 0 0; margin: 0; display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px 24px; }
+  .benefits li { display: flex; gap: 10px; color: var(--muted); font-size: 14px; }
+  .benefits li::before { content: "✓"; color: var(--moss); }
+
+  @media (max-width: 1080px) { .tiers { grid-template-columns: 1fr 1fr; } .tier { margin-top: 6px; } }
+  @media (max-width: 760px) { .steps { grid-template-columns: 1fr; } .benefits ul { grid-template-columns: 1fr 1fr; } }
+  @media (max-width: 560px) { .tiers { grid-template-columns: 1fr; } .benefits ul { grid-template-columns: 1fr; } .seg button { padding: 8px 12px; } }
+</style>
+
+<script>
+  const reduced = matchMedia("(prefers-reduced-motion: reduce)");
+  function tween(el: HTMLElement, from: number, to: number) {
+    if (reduced.matches || from === to || Number.isNaN(from)) {
+      el.textContent = String(to);
+      return;
+    }
+    const start = performance.now();
+    const step = (now: number) => {
+      const k = Math.min(1, (now - start) / 420);
+      const eased = 1 - Math.pow(1 - k, 3);
+      el.textContent = String(Math.round(from + (to - from) * eased));
+      if (k < 1) requestAnimationFrame(step);
+    };
+    requestAnimationFrame(step);
+  }
+
+  document.querySelectorAll<HTMLElement>("[data-plans]").forEach((root) => {
+    const setPeriod = (period: "annual" | "monthly") => {
+      root.dataset.period = period;
+      root.querySelectorAll<HTMLElement>("[data-set-period]").forEach((b) => b.setAttribute("aria-checked", String(b.dataset.setPeriod === period)));
+      root.querySelectorAll<HTMLElement>(".billed").forEach((el) => (el.textContent = el.dataset[period] ?? ""));
+      root.querySelectorAll<HTMLElement>(".amt").forEach((el) => tween(el, Number(el.textContent), Number(el.dataset[period])));
+      root.querySelectorAll<HTMLAnchorElement>("a.choose").forEach((a) => (a.href = a.href.replace(/period=\w+/, `period=${period}`)));
+      root.querySelectorAll<HTMLElement>(".pct").forEach((el) => (el.textContent = `${el.dataset[period]}%`));
+      root.querySelectorAll<HTMLElement>(".off").forEach((el) => {
+        el.textContent = el.dataset[period] ?? "";
+        el.hidden = !el.textContent;
+      });
+    };
+    root.querySelectorAll<HTMLElement>("[data-set-period]").forEach((b) => b.addEventListener("click", () => setPeriod(b.dataset.setPeriod as "annual" | "monthly")));
+    root.querySelectorAll<HTMLElement>("[data-set-product]").forEach((b) =>
+      b.addEventListener("click", () => {
+        const id = b.dataset.setProduct;
+        root.querySelectorAll<HTMLElement>("[data-set-product]").forEach((x) => x.setAttribute("aria-selected", String(x === b)));
+        root.querySelectorAll<HTMLElement>("[data-product-panel]").forEach((panel) => (panel.hidden = panel.dataset.productPanel !== id));
+      }),
+    );
+  });
+</script>
