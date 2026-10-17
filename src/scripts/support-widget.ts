@@ -52,7 +52,7 @@ function signedOutWidget(root: HTMLElement, copy: ReturnType<typeof liveSupportC
   const launch = root.querySelector<HTMLButtonElement>("[data-support-open]")!;
   const history = root.querySelector<HTMLElement>("[data-support-messages]")!;
   const prefix = lang === "en" ? "" : lang === "zh-CN" ? "/zh" : lang === "zh-TW" ? "/zh-hant" : `/${lang}`;
-  history.innerHTML = `<div class="support-greeting"><div aria-hidden="true">✦</div><h3>${escapeSupport(copy.greeting)}</h3><p>${escapeSupport(copy.signInRequired)}</p><a class="support-primary-button" href="${prefix}/app/start">${escapeSupport(copy.signIn)}</a></div>`;
+  history.innerHTML = `<div class="support-greeting"><div aria-hidden="true">✦</div><h3>${escapeSupport(copy.greeting)}</h3><p>${escapeSupport(copy.signInRequired)}</p><a class="support-primary-button" href="${prefix}/app/start/">${escapeSupport(copy.signIn)}</a></div>`;
   root.querySelectorAll<HTMLInputElement | HTMLTextAreaElement | HTMLButtonElement>("form input,form textarea,form button").forEach(control => { control.disabled = true; });
   root.querySelector<HTMLElement>("[data-support-preview]")!.hidden = true;
   root.querySelector<HTMLImageElement>("[data-support-preview] img")!.removeAttribute("src");

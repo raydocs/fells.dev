@@ -3,7 +3,7 @@
 import { agentMarks } from "../../data/icons";
 import { brandIcons } from "../../data/brand-icons";
 import type { Dict } from "../../i18n/en";
-import { pagesOf, link, locales, localeOf } from "../../i18n/index";
+import { pagesOf, link, locales, localeOf, localePath } from "../../i18n/index";
 import { site } from "../../site";
 import Layout from "../../layouts/Layout.astro";
 import Logo from "../Logo.astro";
@@ -95,7 +95,7 @@ const icons = [
     <main id="main" class="panel">
       <details class="lang">
         <summary>文A {current.label} ⌄</summary>
-        <ul>{locales.map((l) => <li><a href={l.path + slug} hreflang={l.hreflang} aria-current={l === current ? "true" : undefined}>{l.label}</a></li>)}</ul>
+        <ul>{locales.map((l) => <li><a href={localePath(l, slug)} hreflang={l.hreflang} aria-current={l === current ? "true" : undefined}>{l.label}</a></li>)}</ul>
       </details>
 
       <div class="box">
