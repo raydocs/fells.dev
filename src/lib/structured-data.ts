@@ -22,7 +22,11 @@ export function pageJsonLd(input: { t: Dict; slug: string; description: string; 
       name: "Fells",
       url: `${origin}/`,
       logo: `${origin}/apple-touch-icon.png`,
-      email: site.contactEmail,
+      contactPoint: {
+        "@type": "ContactPoint",
+        contactType: "customer support",
+        url: `mailto:${site.contactEmail}`,
+      },
     },
     {
       "@type": "WebSite",

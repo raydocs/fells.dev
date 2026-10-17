@@ -22,7 +22,7 @@ const data = {
   locales: locales.map((l) => ({ label: l.label, href: localePath(l, "app"), current: l === current })),
   market: { channels: m.channels, providerDesc: m.providerDesc, directDesc: m.directDesc, sameAsList: m.sameAsList, metrics: m.metrics, levels: m.levels, perMonth: m.perMonth, perM: m.perM, from: m.from, inputFrom: m.inputFrom, more: m.more },
   agents, models: appModels, imageModels, planCovers, creditTiers, signupBonus, channels: appChannels,
-  contact: site.contactEmail,
+  contact: `mailto:${site.contactEmail}`,
   marks: { agents: agentMarks, providers: providerMarks, images: imageModelMarks, channels: channelMarks },
 };
 ---

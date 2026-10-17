@@ -14,6 +14,7 @@ export default defineConfig({
   site,
   trailingSlash: "always",
   devToolbar: { enabled: false },
+  build: { inlineStylesheets: "always" },
   integrations: [
     sitemap({
       filter: (page) => publicPages.has(page),
@@ -31,6 +32,14 @@ export default defineConfig({
     }),
   ],
   vite: {
+    build: {
+      modulePreload: {
+        resolveDependencies(_filename, deps) {
+          // The support widget chunk is fetched on idle or interaction, not with the first paint.
+          return deps.filter((dep) => !dep.includes("support-widget"));
+        },
+      },
+    },
     server: {
       proxy: {
         "/api/app": { target: "http://127.0.0.1:18080", changeOrigin: false },

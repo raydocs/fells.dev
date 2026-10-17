@@ -1,3 +1,6 @@
+import "../styles/support-widget.css";
+import "../styles/support-media.css";
+import "../styles/support-presence.css";
 import { readCustomerSession, openSupportEvents, SESSION_CHANNEL, ensureUserConversation, sendUserMessage, markUserRead, readUserTyping, setUserTyping, readSupportAvailability, SUPPORT_CHANNEL, SupportSessionEnded, type CustomerSupportSession, type SupportConversation, type SupportImage } from "../lib/support-service";
 import { escapeSupport, prepareSupportImage, renderSupportMessages, supportError, supportUnread, installSupportImageViewer } from "../lib/support-ui";
 import type { SupportCopy } from "../i18n/support";
