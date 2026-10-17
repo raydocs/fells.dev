@@ -1,7 +1,7 @@
 ---
 import "../styles/global.css";
-import geistLatin from "@fontsource-variable/geist/files/geist-latin-wght-normal.woff2?url";
-import "@fontsource-variable/geist-mono/files/geist-mono-latin-wght-normal.woff2?url";
+// fonts.css references this file. The import keeps the package in the production dependency graph.
+import "@fontsource-variable/jetbrains-mono/files/jetbrains-mono-latin-wght-normal.woff2?url";
 import type { Dict } from "../i18n/en";
 import { locales, deal, localeOf, localePath } from "../i18n/index";
 import { pageJsonLd } from "../lib/structured-data";
@@ -28,7 +28,6 @@ const jsonLd = JSON.stringify(pageJsonLd({
     <meta charset="utf-8" />
     <meta name="referrer" content="no-referrer" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <link rel="preload" href={geistLatin} as="font" type="font/woff2" crossorigin />
     <title>{title}</title>
     <meta name="description" content={description} />
     {privatePage ? <meta name="robots" content="noindex, nofollow, noarchive" /> : <>
