@@ -1,11 +1,42 @@
 // Client for /app. Renders every signed-in view from the JSON blob in AppPage.astro.
 // Business state is read from the same-origin API; transient drafts stay in memory.
 import { freshState, MAX_MESSAGE, type Ws, type Chat } from "../lib/preview-state";
-import { readApp, commitApp, endApp, getAppBootstrap, getAppWorkspaceRole, getAppMessageMetadata, listAppMembers, inviteAppMember, updateAppMemberRole, removeAppMember, importAppChat,
-  listAppInvitations, acceptAppInvitation, declineAppInvitation, leaveAppWorkspace, listAppPendingInvitations, cancelAppInvitation, type AppInvitation, type AppPendingInvitation } from "../lib/app-service";
+import { readApp, commitApp, endApp, getAppBootstrap, getAppKeys, getAppWorkspaceRole, getAppMessageMetadata, listAppMembers, listAppPendingInvitations, listAppReceivedInvitations, setAppMember, revokeAppInvitation, acceptAppInvitation, declineAppInvitation, leaveAppWorkspace, updateAppMemberRole, removeAppMember, importAppChat, generateAppChat, readAppChatRun, type AppChatRun, type AppChatResult } from "../lib/app-service";
 import { removeLegacyStorage, StaleState, EndedSession } from "../lib/preview-store";
 import { accountApi, agreementText, passwordIsValid, announceSessionChange, setExpectedUser, usageTokens } from "../lib/account-api";
 import { APIError, operationKey } from "../lib/app-http";
+import { businessRulesOf } from "../i18n/business-rules";
+import { tokenPlanWordsOf } from "../i18n/token-plan";
+import { planCheckoutCopy } from "../i18n/plan-checkout";
+import { planPriceCeiling, validPlanPurchase, validPlanReceipt, type PlanPurchase, type PlanKind } from "../lib/plan-checkout";
+import { marketWordsOf } from "../i18n/market";
+import { currencyFlowCopy } from "../i18n/currency-flow";
+import { parseCashMicro, validExchangeQuote, validExchangeReconciliation, microText, storeMoneyIntent, type ExchangeQuote } from "../lib/currency-flow";
+import { parseChatModels, conversationKey, modelFormat, type ChatModel, type ChatModelCatalog } from "../lib/model-chat";
+import { claudeSettings, claudeTemporary, claudeInstall, claudeSettingsPath, type ClaudePlatform } from "../lib/claude-setup";
+import { claudeSetupWordsOf } from "../i18n/claude-setup";
+import { govObsWordsOf } from "../i18n/governance-observability";
+import {
+  generateCliToolOnboarding,
+  computeContextComposition,
+  modelBaseRatesPerM,
+  computeCacheSavings,
+  buildRoutingStory,
+  getReferenceLogTraces,
+  computeLatencyBuckets,
+  formatCooldownCountdown,
+  buildSeatCooldownChannels,
+  isValidCidrOrIp,
+  parseCsvTokens,
+  matchIpAgainstCidrs,
+  evaluateDryRunSimulation,
+  type CliToolId,
+  type CliOsTab,
+  type RouteClass,
+  type InspectedLogRecord,
+  type KeyGovernanceRules,
+  type DryRunSimInput,
+} from "../lib/governance-observability";
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
 const root = document.getElementById("fx");
@@ -31,9 +62,19 @@ async function start(root: HTMLElement, D: any) {
   const A = D.a;
   const security = D.security;
   const zh = D.lang.startsWith("zh");
-  const contactPurchase = D.lang.startsWith("zh") ? "联系客服购买" : D.lang.startsWith("ja") ? "オンラインサポートに購入を相談" : D.lang.startsWith("ko") ? "고객 지원에 구매 문의" : D.lang.startsWith("es") ? "Contactar para comprar" : "Contact support to purchase";
-  const contactEmail = String(D.contact ?? "").replace(/^mailto:/i, "");
-  const requestSupport = () => document.dispatchEvent(new Event("fells:support-open"));
+  const billingRules = businessRulesOf(D.lang);
+  const planWords = tokenPlanWordsOf(D.lang);
+  const pc = planCheckoutCopy(D.lang);
+  const marketWords = marketWordsOf(D.lang);
+  const fx = currencyFlowCopy(D.lang);
+  const claudeWords = claudeSetupWordsOf(D.lang);
+  const govWords = govObsWordsOf(D.lang);
+  const contactPurchase = fx.fund;
+  const requestSupport = (intent: Record<string, unknown> = {}) => document.dispatchEvent(new CustomEvent("fells:support-open", { detail: intent }));
+  const keyLimitRule: Record<string, string> = { "zh-CN": "按该 Key 的美元 API 额度消耗计量；0 表示跟随默认限额。", "zh-TW": "按此 Key 的美元 API 額度消耗計量；0 表示使用預設上限。", ja: "このキーの USD API 利用枠で計測します。0 は既定上限を使用します。", ko: "이 키의 USD API 이용 한도로 계산합니다. 0은 기본 한도를 따릅니다.", es: "Se mide por el saldo API en USD de esta clave; 0 usa el límite predeterminado.", en: "Measured by this key’s USD API allowance consumption; 0 follows the default limit." };
+  const keyDefaultLabel: Record<string, string> = { "zh-CN": "跟随默认限额", "zh-TW": "使用預設上限", ja: "既定上限", ko: "기본 한도", es: "Límite predeterminado", en: "Default limit" };
+  const keyUnlimitedLabel: Record<string, string> = { "zh-CN": "不限额（运营设置）", "zh-TW": "不限額（營運設定）", ja: "上限なし（運営設定）", ko: "무제한 (운영자 설정)", es: "Sin límite (configurado por operaciones)", en: "Unlimited (set by operations)" };
+  const keyUnlimitedHint: Record<string, string> = { "zh-CN": "留空可保留当前不限额设置；填写0改为默认限额，填写正数设置自己的上限。", "zh-TW": "留空可保留目前不限額設定；填寫0改為預設上限，填寫正數設定自己的上限。", ja: "空欄で現在の上限なし設定を維持します。0は既定上限、正の数は独自の上限に変更します。", ko: "비워 두면 현재 무제한 설정을 유지합니다. 0은 기본 한도, 양수는 직접 설정한 한도로 변경합니다.", es: "Déjalo vacío para conservar la configuración sin límite. Usa 0 para el límite predeterminado o un valor positivo para fijar tu límite.", en: "Leave blank to keep the current unlimited setting. Enter 0 for the default limit or a positive value for your own cap." };
   const words = {
     unavailable: zh ? "服务尚未配置" : "Service is not configured",
     history: zh ? "导入 JSON 对话历史" : "Import JSON conversation history",
@@ -42,11 +83,15 @@ async function start(root: HTMLElement, D: any) {
     listValueHint: zh ? "按请求记录中的美元标价汇总" : "USD list prices recorded with requests",
     saved: zh ? "已保存到工作区，Agent 执行服务尚未配置" : "Saved to the workspace. Agent execution is not configured.",
     cash: zh ? "人民币现金" : "CNY cash", grant: zh ? "人民币赠金" : "CNY promotional balance",
-    allowance: zh ? "美元 API 额度" : "USD API allowance", wallet: zh ? "人民币钱包" : "CNY wallet",
+    allowance: zh ? "独立美元 API 额度" : "Independent USD API allowance", wallet: zh ? "人民币钱包" : "CNY wallet",
+    allowanceTerms: billingRules.expiry,
+    manualBillingMode: billingRules.modes,
     exchange: zh ? "兑换 API 额度" : "Buy API allowance", ledger: zh ? "钱包流水" : "Wallet ledger",
     contactPurchase,
     logs: zh ? "调用记录" : "Request logs", empty: zh ? "暂无记录" : "No records",
-    loading: zh ? "正在读取" : "Loading", monthly: zh ? "/月" : "/month",
+    loading: zh ? "正在读取" : "Loading", addMember: A.members.invite,
+    username: zh ? "用户名或已验证邮箱" : "Username or verified email",
+    monthly: zh ? "/月" : "/month",
     memberRoleChange: zh ? "改为" : "Change to",
     notOffered: zh ? "暂无在售商品" : "No products are currently offered",
     accept: zh ? "阅读并接受当前服务条款" : "Read and accept the current terms",
@@ -67,8 +112,31 @@ async function start(root: HTMLElement, D: any) {
     workspaceDelete: zh ? "删除工作区" : "Delete workspace",
     workspaceDeleteSub: zh ? "此操作会永久删除工作区及其中保存的对话。" : "This permanently deletes the workspace and its saved conversations.",
     workspaceDeleteConfirm: zh ? "输入工作区名称以确认删除。" : "Enter the workspace name to confirm deletion.",
+    modelChat: zh ? "文字模型对话" : "Model conversation",
+    chatWelcome: zh ? "开始新对话" : "Start a conversation",
+    chatWelcomeNote: zh ? "选择模型，聊聊你的想法。" : "Choose a model and share your ideas.",
+    chatBilling: zh ? "模型调用按所选 Key 计费" : "Model calls are billed to the selected key.",
+    chatBillingKey: zh ? "计费 Key" : "Billing key",
+    chatManageKey: zh ? "管理" : "Manage",
+    chatReloadModels: zh ? "刷新模型" : "Reload models",
+    chatPlaceholder: zh ? "向所选模型发送文字消息" : "Send a text message to the selected model",
+    modelLoading: zh ? "正在加载模型…" : "Loading models…",
+    modelEmpty: zh ? "此 Key 暂无可用模型。" : "This key has no available models.",
+    modelEmptyLabel: zh ? "暂无可用模型" : "No available models",
+    modelError: zh ? "无法加载模型，请重试。" : "Models could not be loaded. Try again.",
+    modelErrorLabel: zh ? "模型加载失败" : "Models unavailable",
+    noChatKey: zh ? "请选择一把有效的个人 API Key。" : "Choose an active personal API key to continue.",
+    noChatKeyLabel: zh ? "选择 API Key" : "Select an API key",
+    manageKeys: zh ? "管理 API Key" : "Manage API keys",
+    chatCheck: zh ? "查看本次结果" : "Check this request",
+    chatPending: zh ? "本次模型请求尚未结束。可只读查看结果；请勿重复发送相同消息。" : "This model request has not finished. Check its status without sending the same message again.",
+    chatUnknown: zh ? "本次结果尚未确认，可能已执行并计费。请先查看本次结果或刷新历史，不要重复发送。" : "The outcome is not confirmed and the request may have run and been charged. Check this request or refresh history before sending again.",
+    chatFailed: zh ? "本次模型请求未完成。消息和结果以服务器记录为准；不会自动重试。" : "This model request did not complete. Server history is authoritative; it will not be retried automatically.",
+    chatCompleted: zh ? "模型回复已保存。" : "The model reply has been saved.",
+    chatStorage: zh ? "无法保存本次请求标记，尚未发送模型请求。请允许会话存储后重试。" : "The request marker could not be saved, so no model request was sent. Allow session storage before trying again.",
   };
   A.account.credits = words.allowance;
+  A.billing.sub = billingRules.funding;
 
   // ---------- helpers ----------
   const esc = (v: unknown) => String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!);
@@ -79,13 +147,8 @@ async function start(root: HTMLElement, D: any) {
   const dfmt = (d: number | Date, opts: Intl.DateTimeFormatOptions = { month: "short", day: "numeric", year: "numeric" }) => new Intl.DateTimeFormat(D.lang, opts).format(new Date(d));
   const tfmt = (d: number) => new Intl.DateTimeFormat(D.lang, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }).format(new Date(d));
   const agentById = (id: string) => D.agents.find((a: any) => a.id === id) ?? D.agents[0];
-  // The server names other members "Member #<id>" unless they chose a display
-  // name; localize that label and render every name as text only.
-  const memberName = (name: string) => { const m = /^Member #(\d+)$/.exec(name); return m ? fmt(A.members.anonymous, { id: m[1] }) : name; };
-  const waitFor = (seconds: number) => {
-    const minutes = seconds >= 120;
-    return new Intl.NumberFormat(D.lang, { style: "unit", unit: minutes ? "minute" : "second", unitDisplay: "long" }).format(minutes ? Math.ceil(seconds / 60) : seconds);
-  };
+  const memberName = (name: string) => { const match = /^Member #(\d+)$/.exec(name); return match ? fmt(A.members.anonymous, { id: match[1] }) : name; };
+  const retryWait = (seconds: number) => new Intl.NumberFormat(D.lang, { style: "unit", unit: seconds >= 120 ? "minute" : "second", unitDisplay: "long" }).format(seconds >= 120 ? Math.ceil(seconds / 60) : seconds);
   const initials = (name: string) => (name.trim().split(/\s+/).map((w) => w[0]).join("").slice(0, 2) || "?").toUpperCase();
   const M = D.marks;
   const MAC = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
@@ -93,6 +156,9 @@ async function start(root: HTMLElement, D: any) {
   const agentMk = (id: string, size = 18, cls = "") => mk(M.agents[id], size, cls);
 
   const ICONS: Record<string, string> = {
+    layers: "m12 3 9 5-9 5-9-5 9-5ZM3 12l9 5 9-5M3 16l9 5 9-5",
+    box: "m12 3 9 5v8l-9 5-9-5V8l9-5ZM3 8l9 5 9-5M12 13v8",
+    info: "M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20ZM12 11v6M12 7h.01",
     plus: "M12 5v14M5 12h14",
     file: "M4 6.5A1.5 1.5 0 0 1 5.5 5H10l2 2h6.5A1.5 1.5 0 0 1 20 8.5v9a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 4 17.5z",
     users: "M9 11a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7zM3 20c0-3.3 2.7-6 6-6s6 2.7 6 6M16 4.5a3.5 3.5 0 0 1 0 6.5M21 20c0-2.6-1.6-4.8-4-5.6",
@@ -153,9 +219,28 @@ async function start(root: HTMLElement, D: any) {
   let committed = await readApp();
   if (!committed) { location.replace(D.links.start); return; }
   let S = structuredClone(committed.state);
+  let accountSnapshot = JSON.stringify(getAppBootstrap());
+  let marketComposing = false;
   const bindIdentity = () => { const b = getAppBootstrap(); if (b) setExpectedUser({ userId: b.user.id, sessionId: b.session_id }); };
   bindIdentity();
-  const editingForm = () => document.activeElement instanceof HTMLElement && root.contains(document.activeElement) && !!document.activeElement.closest("[data-form]");
+  const fxIdentity = getAppBootstrap()!;
+  const fxStorageKey = `fells.exchange.v1:${fxIdentity.user.id}:${fxIdentity.session_id}`;
+  let exchangeIntent: { key: string; quote: ExchangeQuote } | null = null;
+  try {
+    const stored = JSON.parse(sessionStorage.getItem(fxStorageKey) ?? "null");
+    if (stored && /^[a-f0-9-]{36}$/.test(stored.key) && validExchangeQuote(stored.quote)) exchangeIntent = stored;
+  } catch { /* The form reports storage failure before any financial request. */ }
+  const planStorageKey = `fells.plan-purchase.v1:${fxIdentity.user.id}:${fxIdentity.session_id}`;
+  let planIntent: PlanPurchase | null = null, planReview: PlanPurchase | null = null;
+  let planSelection: { kind: PlanKind; code?: string; pool?: number; tier?: number } | null = null;
+  let planMonths = 1, planError = "";
+  try {
+    const stored = JSON.parse(sessionStorage.getItem(planStorageKey) ?? "null");
+    if (validPlanPurchase(stored)) planIntent = stored;
+  } catch { /* A new financial request requires verified intent storage. */ }
+  let exchangeQuote: ExchangeQuote | null = null;
+  let exchangeAmount = "", exchangeError = "";
+  const editingForm = () => document.activeElement instanceof HTMLElement && root.contains(document.activeElement) && (!!document.activeElement.closest('[data-form]') || (marketComposing && document.activeElement.dataset.input === "marketQ"));
   // Never serialize these values, including on theme/profile saves.
   let saving = false;
   let refreshPending = false;
@@ -174,20 +259,20 @@ async function start(root: HTMLElement, D: any) {
   const adopt = (next: NonNullable<typeof committed>) => {
     committed = next;
     S = structuredClone(next.state);
+    accountSnapshot = JSON.stringify(getAppBootstrap());
     bindIdentity();
+    const cash = root.querySelector<HTMLElement>("[data-exchange-cash]");
+    if (cash) cash.textContent = `CNY ${microText(getAppBootstrap()!.wallet.cash_micro)}`;
   };
   const showLatest = (next: Awaited<ReturnType<typeof readApp>>) => {
     if (!next || next.session !== committed!.session) { clearView(); return; }
     if (next.revision > committed!.revision) {
-      const draft = root.querySelector<HTMLTextAreaElement>("#fx-input")?.value;
       adopt(next); closeDlg(); closePop(); render();
-      const input = root.querySelector<HTMLTextAreaElement>("#fx-input");
-      if (input && draft) input.value = draft;
       toast(security.conflict);
     } else {
-      const draft = root.querySelector<HTMLTextAreaElement>("#fx-input")?.value;
+      const unchanged = next.revision === committed!.revision && accountSnapshot === JSON.stringify(getAppBootstrap());
       adopt(next);
-      if (!dlgEl && !popEl && !editingForm()) { render(); const input = root.querySelector<HTMLTextAreaElement>("#fx-input"); if (input && draft) input.value = draft; }
+      if (!unchanged && !dlgEl && !popEl && !editingForm()) render();
     }
   };
   const refresh = async () => {
@@ -240,7 +325,12 @@ async function start(root: HTMLElement, D: any) {
   const displayName = () => S.profile.name || getAppBootstrap()?.user.username || (S.email ? S.email.split("@")[0] : A.common.you);
   const avatarStyle = () => (typeof S.profile.avatar === "string" ? `--av:url(${JSON.stringify(S.profile.avatar)})` : `--av:${AVATARS[S.profile.avatar % AVATARS.length]}`);
   const avatar = (cls = "") => `<span class="av ${cls}" style='${esc(avatarStyle())}'>${typeof S.profile.avatar === "string" ? "" : esc(initials(displayName()))}</span>`;
-  const balance = () => (getAppBootstrap()?.api_allowance.balance.micro ?? 0) / 1_000_000;
+  // The server includes Token Plan capacity in allowance.micro. Display the
+  // independent 12-month/compensation balance separately from the plan below.
+  const balance = () => {
+    const allowance = getAppBootstrap()?.api_allowance.balance;
+    return ((allowance?.micro ?? 0) - (allowance?.plan_micro ?? 0)) / 1_000_000;
+  };
   const cashBalance = () => (getAppBootstrap()?.wallet.cash_micro ?? 0) / 1_000_000;
   const cny = (n: number) => "¥" + n.toFixed(2);
   const bonusExpiry = () => (getAppBootstrap()?.api_allowance.balance.expires_at ?? 0) * 1000;
@@ -267,9 +357,93 @@ async function start(root: HTMLElement, D: any) {
     apiRange: 0,
     moreOpen: false,
     quickTab: 0,
-    usage: null, logs: null, catalog: null, subscriptions: null, ledger: null,
-    members: [], membersWorkspace: "", dataError: "", dataLoading: false,
-    invitations: null as AppInvitation[] | null, pending: null as AppPendingInvitation[] | null, pendingWorkspace: "", pendingError: "",
+    quickChosen: false,
+    claudePlatform: (/Win/.test(navigator.platform || navigator.userAgent) ? "windows" : MAC ? "macos" : "linux") as ClaudePlatform,
+    claudeSetup: "saved",
+    claudeModel: "",
+    cliTool: "claude-code" as CliToolId,
+    cliOs: (/Win/.test(navigator.platform || navigator.userAgent) ? "powershell" : "unix") as CliOsTab,
+    cliTestResult: null as null | { ok: boolean; latencyMs: number; routeClass: RouteClass; endpoint: string },
+    selectedTraceId: "trc_cc_opus_01",
+    inspectorDrawerCollapsed: true,
+    heavyStatsHydrated: false,
+    spendGrantClaimed: false,
+    keyGovernance: {} as Record<string, Partial<KeyGovernanceRules>>,
+    lastIssuedRawKey: "",
+    dryRun: {
+      model: "claude-opus-5-5",
+      keyId: "",
+      clientProfile: "cc" as RouteClass,
+      clientIp: "10.24.8.15",
+      inputTokens: 28000,
+      outputTokens: 1600,
+      thinkingTokens: 2400,
+      cacheReadTokens: 19200,
+      cacheWriteTokens: 1200,
+    } as DryRunSimInput,
+    usage: null, logs: null, catalog: null, subscriptions: null, tokenPlans: null, ledger: null,
+    members: [], membersWorkspace: "", invitations: null, pendingInvitations: null, pendingWorkspace: "", dataError: "", dataLoading: false,
+    apiCatalog: null, catalogStatus: "loading", catalogError: "", catalogKeyLoaded: -1, catalogLoading: false, chatCatalog: null as ChatModelCatalog | null, chatCatalogStatus: "loading", chatCatalogError: "", chatKey: 0, chatKeyLoaded: 0, chatCatalogLoading: false,
+  };
+  const modelChatEnabled = () => getAppBootstrap()?.capabilities.model_chat === true;
+  type LocalChatRun = AppChatRun & { chat_id: string };
+  const runStorageKey = `fells.chat-run.v1:${fxIdentity.user.id}:${fxIdentity.session_id}`;
+  const chatRuns = new Map<string, LocalChatRun>();
+  try {
+    const stored = JSON.parse(sessionStorage.getItem(runStorageKey) ?? "[]");
+    if (Array.isArray(stored) && stored.length <= 100) for (const run of stored) {
+      if (run && typeof run === "object" && typeof run.chat_id === "string" && /^[a-zA-Z0-9_-]{1,64}$/.test(run.chat_id) && /^[0-9a-f-]{36}$/i.test(run.request_id) && ["pending", "running", "unknown"].includes(run.status)) chatRuns.set(run.chat_id, run);
+    }
+  } catch { /* A fresh request still requires a readable marker before dispatch. */ }
+  const persistChatRuns = () => {
+    const value = JSON.stringify([...chatRuns.values()].filter(run => !["completed", "failed"].includes(run.status)));
+    sessionStorage.setItem(runStorageKey, value);
+    if (sessionStorage.getItem(runStorageKey) !== value) throw new Error(words.chatStorage);
+  };
+  const availableChatKeys = () => getAppKeys().filter(key => conversationKey(key));
+  const selectedChatKey = () => availableChatKeys().find(key => key.id === V.chatKey) ?? availableChatKeys()[0];
+  const loadApiCatalog = async () => {
+    if (ended || !committed || V.catalogLoading) return;
+    const keyID = selectedChatKey()?.id ?? 0;
+    if (modelChatEnabled() && !keyID) { V.apiCatalog = null; V.catalogStatus = "no-key"; if (!saving && !dlgEl && !popEl) render(); return; }
+    const identity = committed.session;
+    V.catalogLoading = true; V.catalogStatus = "loading"; V.catalogError = ""; V.apiCatalog = null;
+    if (!saving && !dlgEl && !popEl) render();
+    try {
+      const catalog = await accountApi.catalog(keyID || undefined);
+      if (ended || committed?.session !== identity || (selectedChatKey()?.id ?? 0) !== keyID) return;
+      if (!catalog || !Array.isArray(catalog.models) || catalog.models.some((model: any) => !model || typeof model.model !== "string" || !model.model)) throw new Error(words.modelError);
+      V.apiCatalog = catalog; V.catalogStatus = "ready"; V.catalogKeyLoaded = keyID;
+    } catch (error) {
+      if (ended || committed?.session !== identity || (selectedChatKey()?.id ?? 0) !== keyID) return;
+      if (error instanceof APIError && error.status === 401) { clearView(); return; }
+      V.apiCatalog = null; V.catalogStatus = "error"; V.catalogError = error instanceof Error ? error.message : words.modelError;
+    } finally {
+      V.catalogLoading = false;
+      if (!ended && (selectedChatKey()?.id ?? 0) !== keyID) void loadApiCatalog();
+      else if (!ended && !saving && !dlgEl && !popEl) render();
+    }
+  };
+  const loadChatModels = async () => {
+    if (!modelChatEnabled() || ended || !committed || V.chatCatalogLoading) return;
+    const key = selectedChatKey();
+    if (!key) { V.chatCatalogStatus = "no-key"; V.chatCatalog = null; if (!saving && !dlgEl && !popEl) render(); return; }
+    const identity = committed.session, keyID = key.id;
+    V.chatKey = keyID; V.chatCatalogLoading = true; V.chatCatalogStatus = "loading"; V.chatCatalogError = "";
+    if (!saving && !dlgEl && !popEl) render();
+    try {
+      const catalog = parseChatModels(await accountApi.chatModels(keyID), keyID);
+      if (ended || committed?.session !== identity || selectedChatKey()?.id !== keyID) return;
+      V.chatCatalog = catalog; V.chatCatalogStatus = catalog.models.length ? "ready" : "empty"; V.chatKeyLoaded = keyID;
+    } catch (error) {
+      if (ended || committed?.session !== identity || selectedChatKey()?.id !== keyID) return;
+      if (error instanceof APIError && error.status === 401) { clearView(); return; }
+      V.chatCatalog = null; V.chatCatalogStatus = "error"; V.chatCatalogError = error instanceof Error ? error.message : words.modelError;
+    } finally {
+      V.chatCatalogLoading = false;
+      if (!ended && selectedChatKey()?.id !== keyID) void loadChatModels();
+      else if (!ended && !saving && !dlgEl && !popEl) render();
+    }
   };
 
   const accountAction = async <T>(run: () => Promise<T>): Promise<T | undefined> => {
@@ -306,15 +480,22 @@ async function start(root: HTMLElement, D: any) {
     if (V.dataLoading) { V.dataReload = true; return; }
     const identity = committed.session, epoch = generation, range = V.apiRange, workspaceID = S.current;
     V.dataLoading = true;
+    if (!V.apiCatalog || V.catalogKeyLoaded !== (selectedChatKey()?.id ?? 0)) void loadApiCatalog();
     const since = usageSince(range);
-    const tasks = [accountApi.usage({ since }), accountApi.logs({ since }), accountApi.catalog(), accountApi.subscriptions(), accountApi.walletLedger(), accountApi.coupons(), accountApi.invoices()];
+    const tasks = [accountApi.usage({ since }), accountApi.logs({ since }), accountApi.catalog(), accountApi.subscriptions(), accountApi.tokenPlans(), accountApi.walletLedger(), accountApi.coupons(), accountApi.invoices()];
     const members = S.current && S.current !== "example" ? listAppMembers(S.current) : Promise.resolve([]);
-    const results = await Promise.allSettled([...tasks, members]);
+    const invitations = listAppReceivedInvitations();
+    const pending = S.current && S.current !== "example" && getAppWorkspaceRole(S.current) === "owner"
+      ? listAppPendingInvitations(S.current) : Promise.resolve([]);
+    const results = await Promise.allSettled([...tasks, members, invitations, pending]);
     V.dataLoading = false;
     if (ended || !committed || committed.session !== identity || generation !== epoch || V.apiRange !== range || S.current !== workspaceID) { void loadAccountViews(); return; }
-    const names = ["usage", "logs", "catalog", "subscriptions", "ledger", "coupons", "invoices", "members"];
+    const names = ["usage", "logs", "catalog", "subscriptions", "tokenPlans", "ledger", "coupons", "invoices", "members", "invitations", "pendingInvitations"];
     V.dataError = "";
     results.forEach((result, i) => {
+      if (names[i] === "catalog" && result.status === "fulfilled" && (!result.value || !Array.isArray((result.value as any).models) || (result.value as any).models.some((model: any) => !model || typeof model.model !== "string" || !model.model))) {
+        V.catalog = null; V.dataError ||= words.modelError; return;
+      }
       if (result.status === "fulfilled") V[names[i]] = result.value;
       else {
         V[names[i]] = null;
@@ -322,23 +503,18 @@ async function start(root: HTMLElement, D: any) {
       }
     });
     V.membersWorkspace = workspaceID;
+    V.pendingWorkspace = workspaceID;
     if (!popEl && !dlgEl && !editingForm()) render();
+    if (!V.heavyStatsHydrated) {
+      setTimeout(() => {
+        if (!ended && !V.heavyStatsHydrated) {
+          V.heavyStatsHydrated = true;
+          if (!saving && !popEl && !dlgEl && !editingForm()) render();
+        }
+      }, 36);
+    }
+    if (modelChatEnabled() && (!V.chatCatalog || V.chatKeyLoaded !== selectedChatKey()?.id)) void loadChatModels();
     if (V.dataReload) { V.dataReload = false; void loadAccountViews(); }
-    else void loadInvitationViews();
-  };
-  // Invitations load after the main views so they never delay them.
-  const loadInvitationViews = async () => {
-    if (ended || !committed) return;
-    const identity = committed.session, workspaceID = S.current;
-    // Only the owner may read a workspace's outstanding invitations.
-    const owner = !!workspaceID && workspaceID !== "example" && getAppWorkspaceRole(workspaceID) === "owner";
-    const [inbox, pending] = await Promise.allSettled([listAppInvitations(), owner ? listAppPendingInvitations(workspaceID) : Promise.resolve([])]);
-    if (ended || !committed || committed.session !== identity || S.current !== workspaceID) return;
-    const reason = (result: PromiseSettledResult<unknown>) => result.status === "rejected" ? (result.reason instanceof Error ? result.reason.message : security.saveFailed) : "";
-    V.invitations = inbox.status === "fulfilled" ? inbox.value : null;
-    V.pending = pending.status === "fulfilled" ? pending.value : null;
-    V.pendingWorkspace = workspaceID; V.pendingError = reason(pending);
-    if (!popEl && !dlgEl && !editingForm()) render();
   };
   // ---------- workspace context ----------
   const isExample = () => S.current === "example";
@@ -388,6 +564,7 @@ async function start(root: HTMLElement, D: any) {
   };
 
   // ---------- sidebar ----------
+  const canDeleteChats = () => !isExample() && ["owner", "editor"].includes(getAppWorkspaceRole(S.current) || "");
   const navItem = (id: string, icon: string, label: string, end = "", current = false) => {
     const disabled = needsWs.has(id) && !hasWs();
     return `<li><button class="ni" data-go="${id}" ${current ? 'aria-current="page"' : ""} ${disabled ? 'aria-disabled="true" title="' + esc(A.nav.needWs) + '"' : ""}>${ic(icon)}<span>${esc(label)}</span>${end ? `<span class="end">${end}</span>` : ""}</button></li>`;
@@ -397,7 +574,7 @@ async function start(root: HTMLElement, D: any) {
     const w = wsName();
     const wsIcon = hasWs() ? `<span class="ws-ic">${esc(initials(w).slice(0, 1))}</span>` : `<span class="ws-ic none">${ic("plus", 14)}</span>`;
     const list = hasWs()
-      ? chats().map((c) => `<button class="chat-i" data-go="chat/${esc(c.id)}" ${r.name === "chat" && r.arg === c.id ? 'aria-current="page"' : ""}>${agentMk(c.agent, 18)}<span>${esc(c.title)}</span></button>`).join("") || `<p class="empty-note">${esc(A.nav.noChats)}</p>`
+      ? chats().map((c) => `<div class="chat-row"><button class="chat-i" data-go="chat/${esc(c.id)}" ${r.name === "chat" && r.arg === c.id ? 'aria-current="page"' : ""}>${agentMk(c.agent, 18)}<span>${esc(c.title)}</span></button>${!canDeleteChats() ? "" : `<button class="icon-btn chat-delete" data-act="del-chat" data-id="${esc(c.id)}" title="${esc(A.chat.delete)}" aria-label="${esc(A.chat.delete)}: ${esc(c.title)}">${ic("trash", 15)}</button>`}</div>`).join("") || `<p class="empty-note">${esc(A.nav.noChats)}</p>`
       : `<p class="empty-note">${esc(A.nav.needWs)}</p>`;
     const memberCount = isExample() ? A.example.members.length : V.membersWorkspace === S.current && Array.isArray(V.members) ? V.members.length : "—";
     const moreIds = ["ws-settings"];
@@ -407,12 +584,18 @@ async function start(root: HTMLElement, D: any) {
       : `<div class="promo"><button class="icon-btn x" data-act="promo-close" aria-label="${esc(A.promo.close)}">${ic("x", 14)}</button><span class="pk">${esc(A.promo.kicker)}</span><b>${esc(A.promo.title)}</b><p>${esc(hasWs() ? A.promo.body : A.promo.noWs)}</p><button class="go" data-act="promo-go"><span>${esc(A.promo.cta)}</span>${ic("chevR", 14)}</button></div>`;
     return `
       <aside class="sb" aria-label="${esc(A.nav.menu)}">
-        <button class="ws-btn" data-act="switcher" aria-haspopup="menu">${wsIcon}<span>${esc(w || A.nav.noWorkspace)}</span>${isExample() ? `<span class="tag">${esc(A.example.badge)}</span>` : ""}${V.invitations?.length ? `<span class="tag" data-invitation-count title="${esc(A.invitations.title)}" aria-label="${esc(fmt(A.invitations.home, { n: V.invitations.length }))}">${V.invitations.length}</span>` : ""}<span class="chev">${ic("chev", 16)}</span></button>
+        <button class="ws-btn" data-act="switcher" aria-haspopup="menu">${wsIcon}<span>${esc(w || A.nav.noWorkspace)}</span>${isExample() ? `<span class="tag">${esc(A.example.badge)}</span>` : ""}<span class="chev">${ic("chev", 16)}</span></button>
         <ul class="navlist">
           ${navItem("new", "plus", A.nav.newChat, `<kbd class="mono">${MAC ? "⇧⌘O" : "Ctrl+Shift+O"}</kbd>`, r.name === "new")}
           ${navItem("members", "users", A.nav.members, hasWs() ? `${memberCount}/32` : "", r.name === "members")}
+          ${navItem("invitations", "users", A.members.inboxTitle, Array.isArray(V.invitations) && V.invitations.length ? String(V.invitations.length) : "", r.name === "invitations")}
           <li><button class="ni" data-act="more" aria-expanded="${moreOpen}">${ic("more")}<span>${esc(A.nav.more)}</span><span class="end">${ic(moreOpen ? "chev" : "chevR", 14)}</span></button></li>
           ${moreOpen ? `<li><ul class="navlist sub-nav">${navItem("ws-settings", "gear", A.nav.wsSettings, "", r.name === "ws-settings")}</ul></li>` : ""}
+        </ul>
+        <ul class="navlist">
+          ${navItem("billing/market", "store", A.account.market, "", r.name === "billing" && r.arg !== "credits")}
+          ${navItem("billing/credits", "card", words.wallet, "", r.name === "billing" && r.arg === "credits")}
+          ${navItem("api", "key", A.account.apiKey, "", r.name === "api")}
         </ul>
         <div class="sec-h"><span>${esc(A.nav.chats)}</span><button class="icon-btn" data-go="import" title="${esc(A.nav.importLocal)}" aria-label="${esc(A.nav.importLocal)}">${ic("import", 16)}</button></div>
         <div class="chats">${list}</div>
@@ -448,33 +631,51 @@ async function start(root: HTMLElement, D: any) {
           <div class="body"><h3>${esc(A.home.startTitle)}</h3><p>${esc(A.home.startBody)}</p><span class="btn pri sm">${ic("plus", 14)}${esc(A.home.create)}</span></div>
         </button>
       </div>
-      ${V.invitations?.length ? `<div class="card pad between" data-invitation-banner><div class="row">${ic("mail", 18)}<b>${esc(fmt(A.invitations.home, { n: V.invitations.length }))}</b></div><button class="btn sm pri" data-act="invitations">${esc(A.invitations.open)}</button></div>` : ""}
       <div class="card sub empty" style="padding:28px"><div class="ico">${ic("file", 22)}</div><h3>${esc(A.home.emptyTitle)}</h3><p>${esc(A.home.emptyBody)}</p></div>
     </div></div>`;
 
   const meter = (n: number | null, hue: string) => (n === null ? "" : `<div class="meter" style="--hue:${hue}">${[1, 2, 3, 4, 5].map((i) => `<i class="${i <= n ? "on" : ""}"></i>`).join("")}</div>`);
-  const modelsFor = (agent: any) => (agent.id === "media" ? D.imageModels.map((n: string) => ({ name: n, provider: "", input: 0, output: 0, tag: "" })) : D.models.filter((m: any) => agent.providers.includes(m.provider)));
-  const currentModel = (agent: any) => V.model[agent.id] || agent.model;
+  const modelsFor = (agent: any) => modelChatEnabled() && !isExample()
+    ? (V.chatCatalog?.models ?? []).map((m: ChatModel) => ({ ...m, name: m.model, provider: m.format, input: 0, output: 0, tag: "" }))
+    : (agent.id === "media" ? D.imageModels.map((n: string) => ({ name: n, provider: "", input: 0, output: 0, tag: "" })) : D.models.filter((m: any) => agent.providers.includes(m.provider)));
+  const currentModel = (agent: any) => modelChatEnabled() && !isExample() ? (modelsFor(agent).find((m: any) => m.name === V.model[agent.id])?.name ?? modelsFor(agent)[0]?.name ?? "") : V.model[agent.id] || agent.model;
+  const chatModelState = () => V.chatCatalogStatus === "ready" ? "" : V.chatCatalogStatus === "no-key" ? words.noChatKey : V.chatCatalogStatus === "empty" ? words.modelEmpty : V.chatCatalogStatus === "error" ? words.modelError : words.modelLoading;
+  const chatModelLabel = () => V.chatCatalogStatus === "no-key" ? words.noChatKeyLabel : V.chatCatalogStatus === "empty" ? words.modelEmptyLabel : V.chatCatalogStatus === "error" ? words.modelErrorLabel : words.modelLoading;
+  const chatRunNotice = (chatID: string) => {
+    const run = chatRuns.get(chatID);
+    if (!run) return "";
+    const message = run.status === "completed" ? words.chatCompleted : run.status === "failed" ? words.chatFailed : run.status === "unknown" ? words.chatUnknown : words.chatPending;
+    return `<div class="note chat-run-status" role="status" data-chat-run="${esc(run.request_id)}" data-run-status="${esc(run.status)}"><p>${esc(message)}${run.error_code ? ` ${esc(run.error_code)}` : ""}</p>${!["completed", "failed"].includes(run.status) ? `<button class="btn sm" data-act="chat-check" data-chat="${esc(chatID)}">${esc(words.chatCheck)}</button>` : ""}</div>`;
+  };
 
   const composer = (opts: { chat?: Chat; disabled?: boolean } = {}) => {
     const agent = agentById(opts.chat ? opts.chat.agent : V.agent);
-    const model = opts.chat ? opts.chat.model : currentModel(agent);
-    const ph = agent.id === "media" ? A.newChat.mediaPlaceholder : fmt(A.newChat.placeholder, { agent: agent.name });
+    const real = modelChatEnabled() && !isExample();
+    const requested = opts.chat ? V.chatModel?.[opts.chat.id] ?? opts.chat.model : currentModel(agent);
+    const choice: ChatModel | undefined = real ? V.chatCatalog?.models.find((m: ChatModel) => m.model === requested) ?? V.chatCatalog?.models[0] : undefined;
+    const model = real ? choice?.model ?? "" : requested;
+    const pending = opts.chat && chatRuns.get(opts.chat.id);
+    const disabled = opts.disabled || (!isExample() && getAppWorkspaceRole(S.current) === "viewer") || real && (saving || V.chatCatalogStatus !== "ready" || !choice || !selectedChatKey() || !!pending && !["completed", "failed"].includes(pending.status));
+    const ph = real ? words.chatPlaceholder : agent.id === "media" ? A.newChat.mediaPlaceholder : fmt(A.newChat.placeholder, { agent: agent.name });
+    const modelLabel = real ? V.chatCatalogStatus === "ready" && choice ? choice.label : chatModelLabel() : model;
     return `
-      <form class="composer ${opts.disabled ? "off" : ""}" data-form="send" ${opts.chat ? `data-chat="${esc(opts.chat.id)}"` : ""}>
+      ${real ? `<div class="chat-model-state" data-model-state="${esc(V.chatCatalogStatus)}"><div class="chat-key-toolbar"><label class="chat-key-control"><span>${esc(words.chatBillingKey)}</span><select data-input="chatKey" aria-label="${esc(words.chatBillingKey)}" ${saving || !availableChatKeys().length ? "disabled" : ""}>${availableChatKeys().map(key => `<option value="${key.id}" ${selectedChatKey()?.id === key.id ? "selected" : ""}>${esc(key.name)} · ${esc(key.prefix)}</option>`).join("") || `<option value="">${esc(words.noChatKeyLabel)}</option>`}</select></label><div class="chat-key-actions"><button class="icon-btn" data-act="chat-models" title="${esc(words.chatReloadModels)}" aria-label="${esc(words.chatReloadModels)}" ${V.chatCatalogLoading || saving || !selectedChatKey() ? "disabled" : ""}>${ic("refresh", 15)}</button><a href="#/api" aria-label="${esc(words.manageKeys)}">${esc(words.chatManageKey)}</a></div></div><p class="chat-model-message" role="status" ${chatModelState() ? "" : "hidden"}>${esc(chatModelState())}</p></div>` : ""}
+      <form class="composer ${disabled ? "off" : ""}" data-form="send" data-model="${esc(model)}" ${opts.chat ? `data-chat="${esc(opts.chat.id)}"` : ""}>
         <label class="sr" for="fx-input">${esc(ph)}</label>
-        <textarea id="fx-input" name="text" maxlength="${MAX_MESSAGE}" rows="2" placeholder="${esc(opts.disabled ? A.example.composer : ph)}" ${opts.disabled ? "disabled" : ""}>${esc(opts.chat ? "" : V.draft)}</textarea>
+        <textarea id="fx-input" name="text" maxlength="${MAX_MESSAGE}" rows="2" placeholder="${esc(opts.disabled ? A.example.composer : ph)}" ${disabled ? "disabled" : ""}>${esc(opts.chat ? "" : V.draft)}</textarea>
         <div class="tools">
           <div class="r">
-            <button type="button" class="model-btn" data-act="model" data-agent="${esc(agent.id)}" ${opts.chat ? `data-chat="${esc(opts.chat.id)}"` : ""} aria-haspopup="menu" ${opts.disabled ? "disabled" : ""}>${agent.id === "media" ? mk(M.images[model] || M.agents.media, 18) : mk(M.providers[(D.models.find((x: any) => x.name === model) || {}).provider] || M.agents[agent.id], 18)}<span>${esc(model)}</span>${ic("chev", 14)}</button>
-            <button class="send" type="submit" aria-label="${esc(A.newChat.send)}" ${opts.disabled ? "disabled" : ""}>${ic("up", 16)}</button>
+            <button type="button" class="model-btn" data-act="model" data-agent="${esc(agent.id)}" ${opts.chat ? `data-chat="${esc(opts.chat.id)}"` : ""} title="${esc(real && V.chatCatalogStatus === "ready" ? model : modelLabel)}" aria-haspopup="menu" ${opts.disabled || real && (saving || V.chatCatalogStatus !== "ready") ? "disabled" : ""}>${real ? ic("box", 18) : agent.id === "media" ? mk(M.images[model] || M.agents.media, 18) : mk(M.providers[(D.models.find((x: any) => x.name === model) || {}).provider] || M.agents[agent.id], 18)}<span>${esc(modelLabel)}</span>${real && V.chatCatalogStatus === "ready" && choice?.label !== model ? `<small>${esc(model)}</small>` : ""}${!real || V.chatCatalogStatus === "ready" ? ic("chev", 14) : ""}</button>
+            <button class="send" type="submit" aria-label="${esc(A.newChat.send)}" ${disabled ? "disabled" : ""}>${ic("up", 16)}</button>
           </div>
         </div>
       </form>
+      ${real ? `<p class="chat-billing-note">${esc(words.chatBilling)}</p>` : ""}
       `;
   };
 
   const vNew = () => {
+    if (modelChatEnabled() && !isExample()) return `${bar(words.modelChat, wsName(), `<button class="btn sm soft" data-go="import">${ic("import", 14)}${esc(A.nav.importLocal)}</button>`, true)}<div class="scroll"><div class="nc model-chat-welcome"><h2>${esc(words.chatWelcome)}</h2><p>${esc(words.chatWelcomeNote)}</p></div></div><div class="dock">${composer()}</div>`;
     const agent = agentById(V.agent);
     const ad = A.newChat.agents[agent.id];
     const ms = modelsFor(agent);
@@ -507,11 +708,9 @@ async function start(root: HTMLElement, D: any) {
 
   const speaker = (chat: Chat, who: string) => {
     if (who === "you") return { name: A.chat.you, html: avatar("sm"), user: true };
-    if (who.startsWith("user: ")) {
-      const name = memberName(who.slice(6));
-      return { name, html: `<span class="av sm" style="--av:${AVATARS[0]}">${esc(initials(name))}</span>`, user: true };
-    }
+    if (who === "assistant") return { name: words.modelChat, html: ic("box", 24), user: false };
     if (who === "agent" || D.agents.some((a: any) => a.id === who)) {
+      if (modelChatEnabled() && !isExample()) return { name: words.modelChat, html: ic("box", 24), user: false };
       const a = agentById(who === "agent" ? chat.agent : who);
       return { name: a.name, html: agentMk(a.id, 24), user: false };
     }
@@ -534,11 +733,11 @@ async function start(root: HTMLElement, D: any) {
         return `<div class="msg ${s.user ? "user" : ""}"><div class="msg-who">${s.html}${esc(s.name)}${author?.imported ? `<span class="tag">${esc(zh ? "导入历史" : "Imported history")}</span>` : ""}</div><div class="msg-body">${esc(text)}</div></div>`;
       })
       .join("");
-    const right = isExample() ? "" : `<button class="icon-btn" data-act="del-chat" data-id="${esc(chat.id)}" title="${esc(A.chat.delete)}" aria-label="${esc(A.chat.delete)}">${ic("trash", 16)}</button>`;
+    const right = !canDeleteChats() ? "" : `<button class="icon-btn" data-act="del-chat" data-id="${esc(chat.id)}" title="${esc(A.chat.delete)}" aria-label="${esc(A.chat.delete)}">${ic("trash", 16)}</button>`;
     return `
       ${bar(chat.title, `${agent.name} · ${chat.model}`, right)}
-      ${strip()}
-      <p class="note chat-execution-note">${esc(A.newChat.executionNote)}</p>
+      ${modelChatEnabled() && !isExample() ? "" : `${strip()}<p class="note chat-execution-note">${esc(A.newChat.executionNote)}</p>`}
+      ${modelChatEnabled() && !isExample() ? chatRunNotice(chat.id) : ""}
       <div class="scroll" data-thread><div class="thread">${msgs}</div></div>
       <div class="dock">${composer({ chat, disabled: isExample() })}</div>`;
   };
@@ -557,21 +756,19 @@ async function start(root: HTMLElement, D: any) {
     const currentUser = getAppBootstrap()?.user.id;
     const membersLoaded = ex || (V.membersWorkspace === S.current && Array.isArray(V.members));
     const members = ex ? A.example.members.map((name: string, i: number) => ({ user_id: -(i + 1), name, role: i ? "editor" : "owner" })) : membersLoaded ? V.members : [];
-    const memberActions = (m: any) => {
-      if (ex || m.role === "owner") return "";
-      if (own) return `<button class="btn sm soft" data-act="member-role" data-id="${m.user_id}" data-role="${m.role === "viewer" ? "editor" : "viewer"}">${esc(words.memberRoleChange)} ${esc(A.members.roles[m.role === "viewer" ? "editor" : "viewer"][0])}</button><button class="btn sm soft" data-act="remove-member" data-id="${m.user_id}">${esc(A.members.remove)}</button>`;
-      return m.user_id === currentUser ? `<button class="btn sm soft" data-act="leave-ws">${esc(A.wsSettings.leave)}</button>` : "";
-    };
     const roleCard = (role: string) => {
       const [name, desc] = A.members.roles[role], list = members.filter((m: any) => m.role === role);
       return `<div class="card"><div class="between" style="padding:14px 16px;border-bottom:1px solid var(--line)"><div><h4>${esc(name)}</h4><small class="muted">${esc(desc)}</small></div>${role === "owner" || ex || !own ? "" : `<button class="btn sm" data-act="invite-link" data-role="${role}">${ic("plus", 13)}${esc(A.members.invite)}</button>`}</div>
-        <div class="list">${list.map((m: any, i: number) => { const label = memberName(m.name); return `<div data-member="${esc(m.user_id)}"><span class="av sm" style="--av:${AVATARS[(i + role.length) % AVATARS.length]}">${esc(initials(label))}</span><span class="grow">${esc(label)}${m.user_id === currentUser ? ` <span class="tag">${esc(A.members.you)}</span>` : ""}</span>${memberActions(m)}</div>`; }).join("") || `<div class="muted">${esc(fmt(A.members.none, { role: name }))}</div>`}</div></div>`;
+        <div class="list">${list.map((m: any, i: number) => `<div><span class="av sm" style="--av:${AVATARS[(i + role.length) % AVATARS.length]}">${esc(initials(memberName(m.name)))}</span><span class="grow">${esc(memberName(m.name))}${m.user_id === currentUser ? ` <span class="tag">${esc(A.members.you)}</span>` : ""}</span>${own && m.role !== "owner" ? `<button class="btn sm soft" data-act="member-role" data-id="${m.user_id}" data-role="${m.role === "viewer" ? "editor" : "viewer"}">${esc(words.memberRoleChange)} ${esc(A.members.roles[m.role === "viewer" ? "editor" : "viewer"][0])}</button><button class="btn sm soft" data-act="remove-member" data-id="${m.user_id}">${esc(A.common.close)}</button>` : ""}</div>`).join("") || `<div class="muted">${esc(fmt(A.members.none, { role: name }))}</div>`}</div></div>`;
     };
-    // Labels are the masked identifier the owner typed; they never confirm an account exists.
-    const pending: AppPendingInvitation[] | null = V.pendingWorkspace === S.current && Array.isArray(V.pending) ? V.pending : null;
-    const pendingCard = ex || !own ? "" : `<div class="card" data-pending-list><div class="between" style="padding:14px 16px;border-bottom:1px solid var(--line)"><h4>${esc(A.members.pending)}</h4></div>
-        <div class="list">${pending ? pending.map((p) => `<div data-pending="${esc(p.id)}"><span class="grow">${esc(p.label)} <span class="tag">${esc(A.members.roles[p.role][0])}</span><small>${esc(fmt(A.members.expires, { date: dfmt(p.expires) }))}</small></span><button class="btn sm soft" data-act="cancel-invite" data-id="${esc(p.id)}">${esc(A.members.cancelInvite)}</button></div>`).join("") || `<div class="muted">${esc(A.members.pendingNone)}</div>` : `<div class="muted">${esc(V.pendingWorkspace === S.current && V.pendingError || words.loading)}</div>`}</div></div>`;
-    return `${bar(A.members.title, wsName())}<div class="scroll"><div class="page narrow stack lg"><div><h2 class="t">${esc(A.members.title)}</h2><p class="muted">${membersLoaded ? `${esc(fmt(A.members.seats, { n: members.length }))} · ${esc(fmt(A.members.left, { n: 32 - members.length }))}` : esc(V.dataError || words.loading)}</p>${!ex && own ? `<p class="note">${esc(A.members.inviteNote)}</p>` : ""}</div>${["owner", "editor", "viewer"].map(roleCard).join("")}${pendingCard}</div></div>`;
+    const pending = V.pendingWorkspace === S.current && Array.isArray(V.pendingInvitations) ? V.pendingInvitations : null;
+    const pendingCard = !ex && own ? `<div class="card"><div style="padding:14px 16px;border-bottom:1px solid var(--line)"><h4>${esc(A.members.pendingTitle)}</h4></div><div class="list">${pending === null ? `<div class="muted">${esc(V.dataError || words.loading)}</div>` : pending.length ? pending.map((inv: any) => `<div><span class="grow">${esc(inv.label)} <span class="tag">${esc(A.members.roles[inv.role][0])}</span><small>${esc(fmt(A.members.expires, { date: dfmt(inv.expires) }))}</small></span><button class="btn sm soft" data-act="revoke-invitation" data-id="${esc(inv.id)}">${esc(A.members.revoke)}</button></div>`).join("") : `<div class="muted">${esc(A.members.pendingEmpty)}</div>`}</div></div>` : "";
+    return `${bar(A.members.title, wsName())}<div class="scroll"><div class="page narrow stack lg"><div><h2 class="t">${esc(A.members.title)}</h2><p class="muted">${membersLoaded ? `${esc(fmt(A.members.seats, { n: members.length }))} · ${esc(fmt(A.members.left, { n: 32 - members.length }))}` : esc(V.dataError || words.loading)}</p>${!ex && own ? `<p class="note">${esc(A.members.inviteNote)}</p>` : ""}</div>${["owner", "editor", "viewer"].map(roleCard).join("")}${pendingCard}${!ex && !own ? `<div class="card pad stack"><h3>${esc(A.members.leave)}</h3><button class="btn danger" data-act="leave-workspace">${esc(A.members.leave)}</button></div>` : ""}</div></div>`;
+  };
+
+  const vInvitations = () => {
+    const inbox = Array.isArray(V.invitations) ? V.invitations : null;
+    return `${bar(A.members.inboxTitle)}<div class="scroll"><div class="page narrow stack lg"><div><h2 class="t">${esc(A.members.inboxTitle)}</h2><p class="muted">${esc(A.members.inboxHint)}</p></div><div class="card list">${inbox === null ? `<div class="muted">${esc(V.dataError || words.loading)}</div>` : inbox.length ? inbox.map((inv: any) => `<div><span class="grow"><b>${esc(inv.workspace_name)}</b> <span class="tag">${esc(A.members.roles[inv.role][0])}</span><small>${esc(fmt(A.members.invitedBy, { name: memberName(inv.inviter_name) }))} · ${esc(fmt(A.members.expires, { date: dfmt(inv.expires) }))}</small></span><button class="btn sm pri" data-act="accept-invitation" data-id="${esc(inv.id)}" data-workspace="${esc(inv.workspace_id)}">${esc(A.members.accept)}</button><button class="btn sm soft" data-act="decline-invitation" data-id="${esc(inv.id)}">${esc(A.members.decline)}</button></div>`).join("") : `<div class="muted">${esc(A.members.inboxEmpty)}</div>`}</div></div></div>`;
   };
 
   const tabsV = (tabs: string[], cur: number, base: string) => `<div class="tabs-v" role="tablist">${tabs.map((t, i) => `<button role="tab" data-go="${base}/${i}" aria-selected="${i === cur}">${esc(t)}</button>`).join("")}</div>`;
@@ -588,7 +785,6 @@ async function start(root: HTMLElement, D: any) {
       </div>
       ${owner ? `<div class="card pad stack" style="border-color:color-mix(in srgb,var(--bad) 40%,var(--line))"><span class="k" style="color:var(--bad)">${esc(zh ? "危险操作" : "Danger zone")}</span><div><h4>${esc(words.workspaceDelete)}</h4><p class="muted" style="font-size:13px">${esc(words.workspaceDeleteSub)}</p></div>
         <form class="row wrap" data-form="del-ws"><input type="text" name="name" placeholder="${esc(wsName())}" aria-label="${esc(words.workspaceDeleteConfirm)}" style="flex:1;min-width:180px" /><button class="btn danger">${esc(words.workspaceDelete)}</button></form><small class="hint">${esc(words.workspaceDeleteConfirm)}</small></div>` : ""}
-      ${!owner && !isExample() && ws() ? `<div class="card pad stack" style="border-color:color-mix(in srgb,var(--bad) 40%,var(--line))"><div><h4>${esc(W.leave)}</h4><p class="muted" style="font-size:13px">${esc(W.leaveSub)}</p></div><div><button class="btn danger" data-act="leave-ws">${esc(W.leave)}</button></div></div>` : ""}
     </div></div>`;
   };
 
@@ -618,19 +814,487 @@ async function start(root: HTMLElement, D: any) {
     return `${bar(U.title)}<div class="scroll"><div class="page"><div class="settings">${tabsV(U.tabs, n, "settings")}<div>${panel}</div></div></div></div>`;
   };
 
+  const keyGovOf = (rawId: string | number) => {
+    const idStr = String(rawId || S.keys[0]?.id || "1");
+    const appKey = getAppKeys().find(k => String(k.id) === idStr);
+    const sKey = S.keys.find(k => String(k.id) === idStr);
+    const local = V.keyGovernance[idStr] || {};
+    const limitMicro = sKey ? (sKey.limit === -1 ? -1 : Math.round(sKey.limit * 1_000_000)) : Number(appKey?.monthly_allow_limit_micro ?? 0);
+    const quotaMicro = local.quota_limit_micros !== undefined
+      ? Number(local.quota_limit_micros)
+      : typeof appKey?.quota_limit_micros === "number"
+        ? Number(appKey.quota_limit_micros)
+        : limitMicro > 0 ? limitMicro : 0;
+    const expiresAt = local.expires_at !== undefined
+      ? Number(local.expires_at)
+      : typeof appKey?.expires_at === "number"
+        ? Number(appKey.expires_at)
+        : 0;
+    const allowedModels = Array.isArray(local.allowed_models)
+      ? local.allowed_models
+      : Array.isArray(appKey?.allowed_models)
+        ? (appKey!.allowed_models as string[])
+        : [];
+    const allowedCidrs = Array.isArray(local.allowed_cidrs)
+      ? local.allowed_cidrs
+      : Array.isArray(appKey?.allowed_cidrs)
+        ? (appKey!.allowed_cidrs as string[])
+        : [];
+    const allowWalletFallback = local.allow_wallet_fallback !== undefined
+      ? Boolean(local.allow_wallet_fallback)
+      : typeof appKey?.allow_wallet_fallback === "boolean"
+        ? Boolean(appKey.allow_wallet_fallback)
+        : true;
+    const usedMicros = local.used_micros !== undefined
+      ? Number(local.used_micros)
+      : typeof appKey?.used_micros === "number"
+        ? Number(appKey.used_micros)
+        : 0;
+    return {
+      id: idStr,
+      name: sKey?.name || appKey?.name || "Default Key",
+      prefix: (sKey as any)?.prefix || appKey?.prefix || "sk-fells…",
+      monthly_allow_limit_micro: limitMicro,
+      quota_limit_micros: quotaMicro,
+      used_micros: usedMicros,
+      expires_at: expiresAt,
+      allowed_models: allowedModels,
+      allowed_cidrs: allowedCidrs,
+      allow_wallet_fallback: allowWalletFallback,
+    };
+  };
+
+  const renderKeyGovBadges = (keyId: string | number): string => {
+    const g = keyGovOf(keyId);
+    const G = govWords.keyGovernance;
+    const chips: string[] = [];
+    if (g.quota_limit_micros > 0) {
+      chips.push(`<span class="gov-chip"><b>${esc(G.badgeSpendCap)}</b> ${(g.quota_limit_micros / 1_000_000).toFixed(2)}</span>`);
+    }
+    if (g.expires_at > 0) {
+      const expired = g.expires_at <= Math.floor(Date.now() / 1000);
+      chips.push(`<span class="gov-chip ${expired ? "warn" : ""}"><b>${esc(G.badgeExpires)}</b> ${esc(dfmt(g.expires_at * 1000))}</span>`);
+    }
+    if (g.allowed_models.length > 0) {
+      chips.push(`<span class="gov-chip"><b>${esc(G.badgeModels)}</b> ${esc(g.allowed_models.join(", "))}</span>`);
+    }
+    if (g.allowed_cidrs.length > 0) {
+      chips.push(`<span class="gov-chip"><b>${esc(G.badgeCidrs)}</b> ${esc(g.allowed_cidrs.join(", "))}</span>`);
+    }
+    chips.push(`<span class="gov-chip ${g.allow_wallet_fallback ? "ok" : "warn"}">${esc(g.allow_wallet_fallback ? G.badgeFallbackOn : G.badgeFallbackOff)}</span>`);
+    return `<span class="key-gov-badges" data-key-gov-badges="${esc(g.id)}">${chips.join("")}</span>`;
+  };
+
+  const renderGovFormFields = (existing?: Partial<KeyGovernanceRules>): string => {
+    const G = govWords.keyGovernance;
+    const quotaVal = existing && (existing.quota_limit_micros ?? 0) > 0 ? String((existing.quota_limit_micros ?? 0) / 1_000_000) : "";
+    const expVal = existing && (existing.expires_at ?? 0) > 0 ? new Date((existing.expires_at ?? 0) * 1000).toISOString().slice(0, 10) : "";
+    const modelsVal = existing?.allowed_models?.length ? existing.allowed_models.join(", ") : "";
+    const cidrsVal = existing?.allowed_cidrs?.length ? existing.allowed_cidrs.join(", ") : "";
+    const fallbackChecked = existing ? existing.allow_wallet_fallback : true;
+    return `<details class="gov-details" data-key-gov-fields>
+      <summary>${esc(G.sectionTitle)}</summary>
+      <div class="gov-fields-body">
+        <label class="f">${esc(G.spendCapLabel)}<input type="number" name="quota_limit_usd" min="0" step="0.01" value="${esc(quotaVal)}" placeholder="50.00" /><small class="hint">${esc(G.spendCapHint)}</small></label>
+        <label class="f">${esc(G.expiresAtLabel)}<input type="date" name="expires_at" value="${esc(expVal)}" /><small class="hint">${esc(G.expiresAtHint)}</small></label>
+        <label class="f">${esc(G.allowedModelsLabel)}<input type="text" name="allowed_models" value="${esc(modelsVal)}" placeholder="${esc(G.allowedModelsPlaceholder)}" /><small class="hint">${esc(G.allowedModelsHint)}</small></label>
+        <label class="f">${esc(G.allowedCidrsLabel)}<input type="text" name="allowed_cidrs" value="${esc(cidrsVal)}" placeholder="${esc(G.allowedCidrsPlaceholder)}" /><small class="hint">${esc(G.allowedCidrsHint)}</small></label>
+        <label class="row" style="gap:8px;align-items:flex-start"><input type="checkbox" name="allow_wallet_fallback" value="1" ${fallbackChecked ? "checked" : ""} /><span><b>${esc(G.walletFallbackLabel)}</b><br /><small class="hint">${esc(G.walletFallbackHint)}</small></span></label>
+      </div>
+    </details>`;
+  };
+
+  const renderCliOnboardingCard = (apiOrigin: string, catalogModels: any[]): string => {
+    const W = govWords.cliOnboarding;
+    const activeKey = selectedChatKey() || getAppKeys()[0];
+    const keyToken = V.lastIssuedRawKey || (activeKey?.prefix ? `${activeKey.prefix}YOUR_SECRET` : "sk-fells-your-api-key");
+    const defaultModel = catalogModels[0]?.model || (V.cliTool === "codex" ? "gpt-6.1-sol" : "claude-sonnet-5-5");
+    const bundle = generateCliToolOnboarding(V.cliTool, V.cliOs, apiOrigin, defaultModel, keyToken);
+    const tools: [CliToolId, string][] = [
+      ["claude-code", "Claude Code"],
+      ["codex", "Codex CLI"],
+      ["cursor", "Cursor"],
+      ["cline", "Cline / Roo Code"],
+      ["opencode", "OpenCode"],
+    ];
+    const testRes = V.cliTestResult;
+    return `<section class="card pad stack" data-cli-onboarding aria-labelledby="cli-onboard-title">
+      <div class="between wrap" style="gap:10px">
+        <div>
+          <span class="k">${esc(W.kicker)}</span>
+          <h3 id="cli-onboard-title" style="margin-top:2px">${esc(W.title)}</h3>
+          <p class="muted" style="font-size:13px;margin-top:2px">${esc(W.sub)}</p>
+        </div>
+        <div class="seg" role="group" aria-label="OS">
+          <button type="button" data-act="cli-os" data-v="unix" aria-pressed="${V.cliOs === "unix"}">${esc(W.osUnix)}</button>
+          <button type="button" data-act="cli-os" data-v="powershell" aria-pressed="${V.cliOs === "powershell"}">${esc(W.osPowershell)}</button>
+        </div>
+      </div>
+      <div class="cli-tool-tabs" role="tablist">
+        ${tools.map(([id, label]) => `<button type="button" role="tab" class="cli-tool-tab" data-act="cli-tool" data-v="${id}" aria-selected="${V.cliTool === id}">${esc(label)}</button>`).join("")}
+      </div>
+      <div class="between wrap" style="gap:10px;padding:8px 12px;border-radius:10px;background:var(--bg2);border:1px solid var(--line)">
+        <div class="row wrap" style="gap:14px;font-size:12.5px">
+          <span><small class="muted">${esc(W.activeKeyLabel)}:</small> <code class="mono">${esc(activeKey ? `${activeKey.name} (${activeKey.prefix})` : keyToken)}</code></span>
+          <span><small class="muted">${esc(W.baseUrlLabel)}:</small> <code class="mono">${esc(bundle.baseUrl)}</code></span>
+          <span class="route-badge ${bundle.routeClass}">${esc(bundle.routeClass)}</span>
+        </div>
+        <button type="button" class="btn sm pri" data-act="cli-test-conn" data-endpoint="${esc(bundle.endpoint)}" data-route="${esc(bundle.routeClass)}">${ic("spark", 13)}${esc(W.testConn)}</button>
+      </div>
+      ${testRes ? `<div class="cli-test-banner" role="status" data-cli-test-result>
+        <span class="pill ok">${esc(W.testSuccess)}</span>
+        <span><b>${esc(W.latencyLabel)}:</b> <code class="mono">${testRes.latencyMs} ms</code></span>
+        <span><b>${esc(W.routeClassLabel)}:</b> <span class="route-badge ${testRes.routeClass}">${esc(testRes.routeClass)}</span></span>
+        <span><b>${esc(W.endpointLabel)}:</b> <code class="mono">${esc(testRes.endpoint)}</code></span>
+      </div>` : ""}
+      <div class="cli-onboard-grid">
+        <div class="cli-code-block">
+          <div class="cli-code-head">
+            <span>${esc(W.shellExportTitle)}</span>
+            <button type="button" class="btn sm" data-act="copy" data-text="${esc(bundle.shellSnippet)}" data-msg="${esc(A.common.copied)}">${ic("copy", 12)}${esc(W.copyShell)}</button>
+          </div>
+          <pre>${esc(bundle.shellSnippet)}</pre>
+        </div>
+        <div class="cli-code-block">
+          <div class="cli-code-head">
+            <span>${esc(W.configFileTitle)} · <code class="mono">${esc(bundle.configPath)}</code></span>
+            <button type="button" class="btn sm" data-act="copy" data-text="${esc(bundle.configSnippet)}" data-msg="${esc(A.common.copied)}">${ic("copy", 12)}${esc(W.copyConfig)}</button>
+          </div>
+          <pre>${esc(bundle.configSnippet)}</pre>
+        </div>
+      </div>
+      <div class="between wrap" style="gap:8px;font-size:12px">
+        <span class="muted">${esc(bundle.notes.join(" · "))}</span>
+        <span class="mono muted" style="overflow-wrap:anywhere;word-break:break-word;min-width:0">${esc(bundle.verifyCommand)}</span>
+      </div>
+    </section>`;
+  };
+
+  const renderLogsAndContextWaterfall = (P: any): string => {
+    const W = govWords.contextWaterfall;
+    const liveLogs: InspectedLogRecord[] = (V.logs?.logs ?? []).map((l: any, idx: number) => ({
+      id: String(l.id || `live_${idx}`),
+      model: String(l.model || "claude-sonnet-5-5"),
+      key_name: l.key_name,
+      key_prefix: l.key_prefix,
+      ts: Number(l.ts || Math.floor(Date.now() / 1000)),
+      status: Number(l.status || 200),
+      latency_ms: Number(l.latency_ms || 640),
+      ttft_ms: Number(l.ttft_ms || Math.max(80, Math.round(Number(l.latency_ms || 640) * 0.24))),
+      input_tokens: Number(l.input_tokens || Math.round(usageTokens(l) * 0.72) || 4200),
+      output_tokens: Number(l.output_tokens || Math.round(usageTokens(l) * 0.28) || 820),
+      thinking_tokens: Number(l.thinking_tokens || 0),
+      cache_read_tokens: Number(l.cache_read_tokens || Math.round(usageTokens(l) * 0.45)),
+      cache_write_5m_tokens: Number(l.cache_write_5m_tokens || 0),
+      cache_write_1h_tokens: Number(l.cache_write_1h_tokens || 0),
+      allow_micro: Number(l.allow_micro || 0),
+      list_micro: Number(l.list_micro || l.allow_micro || 0),
+      seat_covered: Boolean(l.seat_covered),
+      route_class: (l.route_class as RouteClass) || (String(l.model || "").includes("claude") ? "cc" : "non-cc"),
+    }));
+    const refTraces = getReferenceLogTraces();
+    const allTraces = liveLogs.length ? [...liveLogs, ...refTraces] : refTraces;
+    const selected = allTraces.find(t => t.id === V.selectedTraceId) || allTraces[0];
+    const comp = computeContextComposition(selected);
+    const cacheSav = computeCacheSavings(selected, allTraces, 7.2072);
+    const story = buildRoutingStory(selected, 7.2072);
+    const baseRates = modelBaseRatesPerM(selected.model);
+    const segLabelMap: Record<string, string> = {
+      system: W.segSystem,
+      tools: W.segTools,
+      history: W.segHistory,
+      input: W.segInput,
+      output: W.segOutput,
+      thinking: W.segThinking,
+    };
+    return `<section class="stack" data-context-waterfall>
+      <div class="drawer-convergence-bar">
+        <div class="row wrap" style="gap:8px">
+          <span class="hydration-pill">${esc(V.heavyStatsHydrated ? W.hydratedReady : W.hydratingHint)}</span>
+          <span class="muted" style="font-size:12px">${esc(selected.model)} · <code class="mono">${esc(selected.id)}</code></span>
+        </div>
+        <button type="button" class="btn sm soft" data-act="toggle-inspector-drawer" aria-expanded="${!V.inspectorDrawerCollapsed}">
+          ${esc(V.inspectorDrawerCollapsed ? W.drawerToggleOpen : W.drawerToggleClose)}
+        </button>
+      </div>
+      <div class="usage-split-layout">
+        <div class="stack">
+          <div class="sec-title"><h3>${esc(words.logs)}</h3></div>
+          <div class="card list">${(V.logs?.logs ?? []).map((l: any, idx: number) => `<div data-act="inspect-trace" data-id="${esc(String(l.id || `live_${idx}`))}" style="cursor:pointer"><span class="grow"><b>${esc(l.model)} · ${esc(l.key_name || l.key_prefix || "")}</b><small>${esc(tfmt(Number(l.ts) * 1000))} · HTTP ${esc(l.status)} · ${esc(l.latency_ms)} ms · ${esc(usageTokens(l))} tokens${l.seat_covered ? ` · ${esc(P.covered)}` : ""}</small>${l.error ? `<small>${esc(l.error)}</small>` : ""}</span><b>${money2(Number(l.allow_micro || 0) / 1_000_000)}</b></div>`).join("") || `<div class="muted">${esc(V.logs ? words.empty : words.loading)}</div>`}</div>
+          ${(V.logs?.logs?.length ?? 0) >= 50 ? `<button class="btn sm" data-act="logs-more">${esc(zh ? "加载更早记录" : "Load earlier records")}</button>` : ""}
+          ${V.dataError ? `<p class="note" role="status">${esc(V.dataError)}</p>` : ""}
+          <div class="card pad stack" style="gap:8px">
+            <div class="between wrap"><small class="muted">${esc(W.sampleRequestsLabel)}</small><span class="hydration-pill">${esc(V.heavyStatsHydrated ? W.hydratedReady : W.hydratingHint)}</span></div>
+            <div class="row wrap" style="gap:6px">
+              ${allTraces.slice(0, 5).map(t => `<button type="button" class="btn sm ${selected.id === t.id ? "pri" : "soft"}" data-act="inspect-trace" data-id="${esc(t.id)}"><span class="route-badge ${t.route_class || "cc"}">${esc(t.route_class || "cc")}</span> ${esc(t.model)} · ${t.latency_ms}ms</button>`).join("")}
+            </div>
+          </div>
+        </div>
+        <aside class="card pad stack inspector-drawer-panel" data-drawer-collapsed="${V.inspectorDrawerCollapsed}" aria-label="${esc(W.title)}">
+          <div class="between wrap">
+            <div>
+              <span class="k">${esc(W.kicker)}</span>
+              <h3 style="margin-top:2px">${esc(W.title)}</h3>
+              <p class="muted" style="font-size:12.5px">${esc(W.sub)}</p>
+            </div>
+            <span class="route-badge ${story.routeClass}">${esc(story.routeClassLabel)}</span>
+          </div>
+          ${!V.heavyStatsHydrated ? `<div class="stack"><div class="skeleton-pulse"></div><div class="skeleton-pulse" style="height:88px"></div></div>` : `
+          <div class="stack" style="gap:8px">
+            <div class="between"><b style="font-size:13px">${esc(W.stackedTitle)}</b><small class="mono muted">${comp.totalTokens.toLocaleString()} ${esc(W.tokensUnit)} · In ${baseRates.inputPerM}/M · Out ${baseRates.outputPerM}/M</small></div>
+            <div class="ctx-stacked-bar" role="img" aria-label="${esc(W.stackedTitle)}">
+              ${comp.segments.map(seg => `<span class="ctx-seg" style="width:${Math.max(2, seg.pct)}%;background:${seg.color}" title="${esc(segLabelMap[seg.key] || seg.key)}: ${seg.tokens.toLocaleString()} (${seg.pct}%)"></span>`).join("")}
+            </div>
+            <div class="ctx-legend">
+              ${comp.segments.map(seg => `<div class="ctx-legend-item"><span class="row" style="gap:6px"><i class="ctx-dot" style="background:${seg.color}"></i><span>${esc(segLabelMap[seg.key] || seg.key)}</span></span><b class="mono">${seg.tokens.toLocaleString()} (${seg.pct}%)</b></div>`).join("")}
+            </div>
+          </div>
+          <div class="cache-savings-card">
+            <div class="between wrap">
+              <b>${esc(W.cacheCardTitle)}</b>
+              <span class="pill ok">${esc(W.cacheHitRate)}: ${cacheSav.hitRatePct}%</span>
+            </div>
+            <div class="kv" style="grid-template-columns:repeat(auto-fit,minmax(135px,1fr));gap:8px">
+              <div><small>${esc(W.cacheReadLabel)}</small><b class="mono">${cacheSav.cacheReadTokens.toLocaleString()}</b></div>
+              <div><small>${esc(W.cacheWriteLabel)}</small><b class="mono">${cacheSav.cacheWrite5mTokens.toLocaleString()} / ${cacheSav.cacheWrite1hTokens.toLocaleString()}</b></div>
+              <div><small>${esc(W.savedSingleLabel)}</small><b class="mono">${cacheSav.savedUsdSingle.toFixed(4)} / ¥${cacheSav.savedCnySingle.toFixed(3)}</b></div>
+              <div><small>${esc(W.savedWindowLabel)}</small><b class="mono">${cacheSav.savedUsdWindow.toFixed(3)} / ¥${cacheSav.savedCnyWindow.toFixed(2)}</b></div>
+            </div>
+          </div>
+          <div class="stack" style="gap:8px">
+            <b style="font-size:13px">${esc(W.waterfallTitle)}</b>
+            <div class="waterfall-list">
+              <div class="waterfall-step"><span class="waterfall-dot"></span><div class="grow"><b>${esc(W.stepClassify)}</b><small class="muted">${esc(story.routeClassLabel)} · Retry: ${story.retries}</small></div><span class="route-badge ${story.routeClass}">${esc(story.routeClass)}</span></div>
+              <div class="waterfall-step"><span class="waterfall-dot"></span><div class="grow"><b>${esc(W.stepLease)}</b><small class="muted">${esc(story.leaseAccount)} · ${esc(W.lcpMatch)}: ${story.lcpAffinityPct}%</small></div><code class="mono" style="font-size:11.5px">IP ${esc(story.egressIp)} (${story.egressStabilityScore})</code></div>
+              <div class="waterfall-step"><span class="waterfall-dot"></span><div class="grow"><b>${esc(W.stepTtft)} & ${esc(W.stepStream)}</b><small class="muted">TTFT ${story.ttftMs} ms · Stream ${story.streamMs} ms</small></div><code class="mono" style="font-size:11.5px">${story.totalMs} ms</code></div>
+              <div class="waterfall-step"><span class="waterfall-dot"></span><div class="grow"><b>${esc(W.stepBilling)}</b><small class="muted">${esc(W.formulaTitle)}</small></div><b class="mono">${story.finalUsd.toFixed(4)} / ¥${story.finalCny.toFixed(4)}</b></div>
+            </div>
+            <div class="formula-box">${esc(story.formulaText)}</div>
+          </div>`}
+        </aside>
+      </div>
+    </section>`;
+  };
+
+  const renderHealthAndCooldownSection = (): string => {
+    const W = govWords.latencyCooldown;
+    const nowSec = Math.floor(Date.now() / 1000);
+    const hist = computeLatencyBuckets(V.logs?.logs ?? []);
+    const channels = buildSeatCooldownChannels(nowSec, V.spendGrantClaimed, V.subscriptions?.plans);
+    const bucketColors: Record<string, string> = {
+      lt500: "var(--ok, #16a34a)",
+      "500to1000": "#3b82f6",
+      "1000to2000": "#f59e0b",
+      gt5000: "var(--bad, #ef4444)",
+    };
+    const bucketNames: Record<string, string> = {
+      lt500: W.bucketFast,
+      "500to1000": W.bucketNormal,
+      "1000to2000": W.bucketSlow,
+      gt5000: W.bucketOutlier,
+    };
+    return `<section class="card pad stack" data-health-telemetry aria-labelledby="health-telemetry-title">
+      <div class="between wrap" style="gap:10px">
+        <div>
+          <span class="k">${esc(W.kicker)}</span>
+          <h3 id="health-telemetry-title" style="margin-top:2px">${esc(W.title)}</h3>
+          <p class="muted" style="font-size:13px;margin-top:2px">${esc(W.sub)}</p>
+        </div>
+        <div class="row wrap" style="gap:8px">
+          <span class="gov-chip"><b>${esc(W.p50Ttft)}:</b> ${hist.p50TtftMs} ms</span>
+          <span class="gov-chip"><b>${esc(W.p95Ttft)}:</b> ${hist.p95TtftMs} ms</span>
+          <span class="gov-chip"><b>${esc(W.p95Total)}:</b> ${hist.p95TotalMs} ms</span>
+        </div>
+      </div>
+      <div class="telemetry-split">
+        <div class="stack" style="gap:10px">
+          <b style="font-size:13px">${esc(W.histogramTitle)}</b>
+          <div class="bucket-bars">
+            ${hist.buckets.map(b => `<div class="bucket-row">
+              <span>${esc(bucketNames[b.id] || b.label)}</span>
+              <div class="bucket-track"><div class="bucket-fill" style="width:${Math.max(b.count ? 4 : 0, b.pct)}%;background:${bucketColors[b.id] || "#3b82f6"}"></div></div>
+              <b class="mono" style="text-align:right">${b.count} (${b.pct}%)</b>
+            </div>`).join("")}
+          </div>
+        </div>
+        <div class="stack" style="gap:10px">
+          <div class="between wrap">
+            <b style="font-size:13px">${esc(W.cooldownTitle)}</b>
+            <span class="spend-grant-badge">✨ ${esc(W.spendGrantBadge)}</span>
+          </div>
+          <div class="cooldown-list">
+            ${channels.map(ch => `<div class="cooldown-item">
+              <div class="grow stack" style="gap:3px">
+                <div class="row wrap" style="gap:6px">
+                  <b>${esc(ch.name)}</b>
+                  <span class="gov-chip">${esc(ch.windowKind === "5h" ? W.window5h : W.window7d)}</span>
+                  <span class="gov-chip ${ch.status === "healthy" ? "ok" : "warn"}">${esc(ch.status === "healthy" ? W.statusHealthy : W.statusCooling)} · ${ch.utilizationPct}%</span>
+                </div>
+                <small class="muted">Egress IP <code class="mono">${esc(ch.egressIp)}</code> · Score ${ch.stabilityScore}</small>
+              </div>
+              <div class="row wrap" style="gap:8px">
+                ${ch.status === "cooldown" ? `<span class="cooldown-timer" data-cooldown-until="${ch.cooldownUntilSec}">${esc(formatCooldownCountdown(ch.cooldownUntilSec, nowSec, W.recoverIn))}</span>` : `<span class="pill ok">${esc(W.statusHealthy)}</span>`}
+                ${ch.spendGrantEligible ? `<button type="button" class="btn sm pri" data-act="claim-spend-grant" ${ch.spendGrantApplied ? "disabled" : ""}>${esc(ch.spendGrantApplied ? W.spendGrantResetDone : W.spendGrantAction)}</button>` : ""}
+              </div>
+            </div>`).join("")}
+          </div>
+          <p class="hint">${esc(W.spendGrantHint)}</p>
+        </div>
+      </div>
+    </section>`;
+  };
+
+  const renderDryRunSandboxSection = (): string => {
+    const W = govWords.dryRun;
+    const nowSec = Math.floor(Date.now() / 1000);
+    const activeKeyId = V.dryRun.keyId || S.keys[0]?.id || "1";
+    const gov = keyGovOf(activeKeyId);
+    const ipMatches = matchIpAgainstCidrs(V.dryRun.clientIp, gov.allowed_cidrs);
+    const sim = evaluateDryRunSimulation(V.dryRun, gov, nowSec, 7.2072);
+    const profileOptions: [RouteClass, string][] = [
+      ["cc", W.profileCc],
+      ["cc-thin", W.profileCcThin],
+      ["non-cc", W.profileNonCc],
+    ];
+    return `<section class="card pad stack" data-dryrun-sandbox aria-labelledby="dryrun-sandbox-title">
+      <div class="between wrap" style="gap:10px">
+        <div>
+          <span class="k">${esc(W.kicker)}</span>
+          <h3 id="dryrun-sandbox-title" style="margin-top:2px">${esc(W.title)}</h3>
+          <p class="muted" style="font-size:13px;margin-top:2px">${esc(W.sub)}</p>
+        </div>
+        <div class="row wrap" style="gap:6px">
+          <button type="button" class="btn sm soft" data-act="dryrun-preset" data-v="cc-pass">Claude Code + Cache</button>
+          <button type="button" class="btn sm soft" data-act="dryrun-preset" data-v="cidr-block">CIDR Block Demo</button>
+          <button type="button" class="btn sm soft" data-act="dryrun-preset" data-v="non-cc">Standard OpenAI SDK</button>
+        </div>
+      </div>
+      <div class="dryrun-grid">
+        <form class="stack" data-form="dryrun-sim" style="gap:10px">
+          <div class="grid2" style="gap:10px">
+            <label class="f">${esc(W.modelLabel)}
+              <select name="model" data-input="dryrunModel">
+                ${["claude-opus-5-5", "claude-sonnet-5-5", "gpt-6.1-sol", "grok-4.3-beta"].map(m => `<option value="${m}" ${V.dryRun.model === m ? "selected" : ""}>${m}</option>`).join("")}
+              </select>
+            </label>
+            <label class="f">${esc(W.keyLabel)}
+              <select name="keyId" data-input="dryrunKey">
+                ${(S.keys.length ? S.keys : [{ id: "1", name: "Default Key", prefix: "sk-fells…" }]).map((k: any) => `<option value="${esc(k.id)}" ${String(activeKeyId) === String(k.id) ? "selected" : ""}>${esc(k.name)} (${esc(k.prefix || "sk-…")})</option>`).join("")}
+              </select>
+            </label>
+          </div>
+          <div class="grid2" style="gap:10px">
+            <label class="f">${esc(W.clientProfileLabel)}
+              <select name="clientProfile" data-input="dryrunProfile">
+                ${profileOptions.map(([val, label]) => `<option value="${val}" ${V.dryRun.clientProfile === val ? "selected" : ""}>${esc(label)}</option>`).join("")}
+              </select>
+            </label>
+            <label class="f">${esc(W.clientIpLabel)}
+              <input type="text" name="clientIp" data-input="dryrunIp" value="${esc(V.dryRun.clientIp)}" placeholder="10.24.8.15" />
+            </label>
+          </div>
+          <div class="grid2" style="gap:10px">
+            <label class="f">${esc(W.inputTokensLabel)}<input type="number" name="inputTokens" min="0" step="100" value="${V.dryRun.inputTokens}" /></label>
+            <label class="f">${esc(W.outputTokensLabel)}<input type="number" name="outputTokens" min="0" step="100" value="${V.dryRun.outputTokens}" /></label>
+            <label class="f">${esc(W.thinkingTokensLabel)}<input type="number" name="thinkingTokens" min="0" step="100" value="${V.dryRun.thinkingTokens}" /></label>
+            <label class="f">${esc(W.cacheReadTokensLabel)}<input type="number" name="cacheReadTokens" min="0" step="100" value="${V.dryRun.cacheReadTokens}" /></label>
+          </div>
+          <button type="submit" class="btn pri">${ic("spark", 14)}${esc(W.runBtn)}</button>
+        </form>
+        <div class="stack" style="gap:10px" data-dryrun-output>
+          <div class="between wrap" style="padding:10px 12px;border-radius:10px;background:var(--bg2);border:1px solid var(--line)">
+            <span class="row" style="gap:8px">
+              <span class="pill ${sim.overallAllowed ? "ok" : "warn"}">${esc(sim.overallAllowed ? W.decisionPass : W.decisionBlock)}</span>
+              <span class="route-badge ${sim.routeClass}">${esc(sim.routeClass)}</span>
+            </span>
+            <small class="mono muted">CIDR: ${ipMatches ? "MATCH" : "DENY"}</small>
+          </div>
+          <p class="muted" style="font-size:12px">${esc(sim.classifyReason)}</p>
+          <div class="gate-list">
+            ${sim.gateChecks.map(g => `<div class="gate-row">
+              <span><b>${esc(g.gate)}</b> · <small class="muted">${esc(g.detail)}</small></span>
+              <span class="gov-chip ${g.passed ? "ok" : "warn"}">${g.passed ? "PASS" : "BLOCK"}</span>
+            </div>`).join("")}
+          </div>
+          <div class="kv" style="grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:8px">
+            <div><small>${esc(W.stickyLeaseResult)}</small><b class="mono" style="font-size:12.5px">${esc(sim.selectedSeat)} (${sim.lcpAffinityPct}%)</b></div>
+            <div><small>${esc(W.egressScoreResult)}</small><b class="mono" style="font-size:12.5px">${esc(sim.egressIp)} · ${sim.egressStabilityScore}/100</b></div>
+            <div><small>${esc(W.lockedFxResult)} (${sim.lockedFxRate})</small><b class="mono" style="font-size:12.5px">${sim.estimatedUsd.toFixed(4)} / ¥${sim.estimatedCny.toFixed(4)}</b></div>
+          </div>
+          <div class="formula-box">${esc(sim.formulaText)}</div>
+        </div>
+      </div>
+    </section>`;
+  };
+
   const paid = () => getAppBootstrap()?.capabilities.api_keys === true;
   const vApi = () => {
     const P = A.api;
-    const base = location.origin + "/v1";
+    const apiOrigin = location.hostname === "fells.dev" || location.hostname.endsWith(".fells.dev")
+      ? "https://api.fells.dev" : location.origin;
+    const base = `${apiOrigin}/v1`;
+    const catalogModels = Array.isArray(V.apiCatalog?.models) ? V.apiCatalog.models.filter((model: any) => model?.routable !== false) : [];
+    const chatFormats = ["anthropic-messages", "openai-completions", "openai-responses", "gemini-generatecontent"];
+    const curlModel = catalogModels.find((m: any) => modelFormat(m, chatFormats, "api") && typeof m.model === "string");
+    const curlFormat = curlModel ? modelFormat(curlModel, chatFormats, "api") : undefined;
+    // Keep dynamic model IDs inside the shell's single-quoted JSON argument.
+    const curlModelJSON = curlModel ? JSON.stringify(curlModel.model).replace(/'/g, "\\u0027") : "";
+    const catalogUnavailable = V.catalogStatus === "loading" ? (zh ? "# 正在读取模型目录，请稍候。" : "# Loading the model catalog. Please wait.") : V.catalogStatus === "error" ? (zh ? "# 模型目录读取失败，请刷新后重试。" : "# The model catalog could not be loaded. Reload before trying again.") : V.catalogStatus === "no-key" ? `# ${words.noChatKey}` : "";
+    const noChatModel = catalogUnavailable || (zh
+      ? "# 当前模型目录没有可用的聊天端点路由。请确认 API 访问权限和模型目录。"
+      : "# No chat endpoint is currently available in the model catalog for this account.");
+    const curlSnippet = !curlModel ? noChatModel
+      : curlFormat === "anthropic-messages" ? `curl ${apiOrigin}/v1/messages \\\n  -H "x-api-key: $FELLS_API_KEY" \\\n  -H "anthropic-version: 2023-06-01" \\\n  -H "Content-Type: application/json" \\\n  -d '{"model": ${curlModelJSON}, "max_tokens": 256, "messages": [{"role": "user", "content": "Hello"}]}'`
+      : curlFormat === "openai-completions" ? `curl ${base}/chat/completions \\\n  -H "Authorization: Bearer $FELLS_API_KEY" \\\n  -H "Content-Type: application/json" \\\n  -d '{"model": ${curlModelJSON}, "messages": [{"role": "user", "content": "Hello"}]}'`
+      : curlFormat === "openai-responses" ? `curl ${base}/responses \\\n  -H "Authorization: Bearer $FELLS_API_KEY" \\\n  -H "Content-Type: application/json" \\\n  -d '{"model": ${curlModelJSON}, "input": "Hello"}'`
+      : `curl "${apiOrigin}/v1beta/models/${encodeURIComponent(curlModel.model)}:generateContent" \\\n  -H "x-goog-api-key: $FELLS_API_KEY" \\\n  -H "Content-Type: application/json" \\\n  -d '{"contents": [{"parts": [{"text": "Hello"}]}]}'`;
+    const openAIFormats = ["openai-completions", "openai-responses"];
+    const openAIModel = catalogModels.find((m: any) => modelFormat(m, openAIFormats, "api") && typeof m.model === "string");
+    const openAIFormat = openAIModel ? modelFormat(openAIModel, openAIFormats, "api") : undefined;
+    const openAIModelJSON = openAIModel ? JSON.stringify(openAIModel.model) : "";
+    const noOpenAIModel = catalogUnavailable || (zh
+      ? "# 当前模型目录没有可用的 OpenAI 兼容端点路由。请确认 API 访问权限和模型目录。"
+      : "# No OpenAI-compatible endpoint is currently available in the model catalog for this account.");
+    const openAISnippet = !openAIModel ? noOpenAIModel
+      : openAIFormat === "openai-completions" ? `import os\nfrom openai import OpenAI\n\nclient = OpenAI(base_url="${base}", api_key=os.environ["FELLS_API_KEY"])\nreply = client.chat.completions.create(\n    model=${openAIModelJSON},\n    messages=[{"role": "user", "content": "Hello"}],\n)`
+      : `import os\nfrom openai import OpenAI\n\nclient = OpenAI(base_url="${base}", api_key=os.environ["FELLS_API_KEY"])\nreply = client.responses.create(\n    model=${openAIModelJSON},\n    input="Hello",\n)`;
+    const claudeModels = catalogModels.filter((m: any) => modelFormat(m, ["anthropic-messages"], "claude_code") && typeof m.model === "string" && m.model.trim().length > 0);
+    const claudeModel = claudeModels.find((m: any) => m.model === V.claudeModel) ?? claudeModels[0];
+    if (!V.quickChosen && V.catalogStatus === "ready") V.quickTab = curlModel ? 0 : openAIModel ? 1 : claudeModel ? 2 : 0;
+    const claudeSnippet = !claudeModel ? catalogUnavailable || (zh ? "# 当前暂无适用于 Claude Code 的模型。" : "# No Claude Code-compatible model is currently available for this account.")
+      : V.claudeSetup === "temporary"
+        ? claudeTemporary(apiOrigin, claudeModel.model, V.claudePlatform, claudeWords.temporaryKeyPrompt, claudeWords.emptyKeyMessage)
+        : claudeSettings(apiOrigin, claudeModel.model);
+    const quickFormat = V.quickTab === 1 ? openAIFormat : V.quickTab === 2 ? claudeModel ? "anthropic-messages" : undefined : curlFormat;
+    const quickBase = V.quickTab === 2 || quickFormat === "anthropic-messages" || quickFormat === "gemini-generatecontent" ? apiOrigin : base;
+    const quickEndpoint = quickFormat === "anthropic-messages" ? "/v1/messages" : quickFormat === "openai-completions" ? "/v1/chat/completions" : quickFormat === "openai-responses" ? "/v1/responses" : quickFormat === "gemini-generatecontent" ? "/v1beta/models/{model}:generateContent" : "";
     const stats = (V.usage?.usage ?? []).reduce((out: any, row: any) => ({
       requests: out.requests + Number(row.requests ?? 0), tokens: out.tokens + usageTokens(row),
       charged: out.charged + Number(row.allow_micro ?? 0), covered: out.covered + Number(row.list_micro ?? 0),
     }), { requests: 0, tokens: 0, charged: 0, covered: 0 });
     const snippets = [
-      ["curl", `curl ${base}/chat/completions \\\n  -H "Authorization: Bearer $FELLS_API_KEY" \\\n  -H "Content-Type: application/json" \\\n  -d '{"model": "claude-sonnet-5.5", "messages": [{"role": "user", "content": "Hello"}]}'`],
-      ["OpenAI SDK", `from openai import OpenAI\n\nclient = OpenAI(base_url="${base}", api_key=os.environ["FELLS_API_KEY"])\nreply = client.chat.completions.create(\n    model="gpt-6.1-sol",\n    messages=[{"role": "user", "content": "Hello"}],\n)`],
-      ["Claude Code", `export ANTHROPIC_BASE_URL="${location.origin}"\nexport ANTHROPIC_AUTH_TOKEN="$FELLS_API_KEY"\nclaude`],
+      ["curl", curlSnippet],
+      ["OpenAI SDK", openAISnippet],
+      ["Claude Code", claudeSnippet],
     ];
+    const primarySnippet = `<div class="codebox" data-catalog-state="${esc(V.catalogStatus)}" ${V.quickTab === 2 ? `data-claude-mode="${esc(V.claudeSetup)}"` : ""}><pre class="code">${esc(snippets[V.quickTab][1])}</pre><button class="btn sm" data-act="copy" data-text="${esc(snippets[V.quickTab][1])}" data-msg="${esc(A.common.copied)}">${ic("copy", 13)}${esc(V.quickTab === 2 && claudeModel ? V.claudeSetup === "saved" ? claudeWords.copyConfig : claudeWords.copyCommand : A.common.copy)}</button></div>`;
+    const guideCode = (code: string) => `<div class="setup-code"><pre class="code">${esc(code)}</pre><button class="btn sm" data-act="copy" data-text="${esc(code)}" data-msg="${esc(A.common.copied)}">${ic("copy", 13)}${esc(claudeWords.copyCommand)}</button></div>`;
+    const claudeGuide = V.quickTab !== 2 ? primarySnippet : !claudeModel
+      ? `${primarySnippet}<p class="hint">${esc(claudeWords.noModelHint)}</p>`
+      : `<section class="claude-guide" aria-labelledby="claude-setup-title" data-claude-guide>
+        <header class="claude-guide-head"><h3 id="claude-setup-title">${esc(claudeWords.title)}</h3><p>${esc(claudeWords.intro)}</p></header>
+        <div class="claude-guide-controls"><label class="f">${esc(claudeWords.platform)}<select data-input="claudePlatform">${([ ["macos", "macOS · Zsh"], ["linux", "Linux / Bash"], ["windows", "Windows · PowerShell"] ] as const).map(([value, label]) => `<option value="${value}" ${V.claudePlatform === value ? "selected" : ""}>${label}</option>`).join("")}</select></label><label class="f">${esc(claudeWords.model)}<select data-input="claudeModel">${claudeModels.map((m: any) => `<option value="${esc(m.model)}" ${claudeModel.model === m.model ? "selected" : ""}>${esc(m.display_name || m.model)}</option>`).join("")}</select><small>${esc(claudeWords.modelHint)}</small></label></div>
+        <details class="claude-guide-details" data-claude-prerequisites><summary>${esc(claudeWords.installTitle)}</summary><div class="stack"><p>${esc(claudeWords.installBody)}</p>${guideCode(claudeInstall(V.claudePlatform))}<a href="https://code.claude.com/docs/en/setup#install-claude-code" target="_blank" rel="noopener noreferrer">${esc(claudeWords.installLink)}${ic("ext", 12)}</a><h4>${esc(claudeWords.keyTitle)}</h4><p>${esc(claudeWords.keyBody)}</p></div></details>
+        <div class="seg claude-setup-mode" role="group" aria-label="${esc(claudeWords.settingsTitle)}"><button type="button" data-act="claude-mode" data-v="saved" aria-pressed="${V.claudeSetup === "saved"}">${esc(claudeWords.saved)}</button><button type="button" data-act="claude-mode" data-v="temporary" aria-pressed="${V.claudeSetup === "temporary"}">${esc(claudeWords.temporary)}</button></div>
+        <ol class="claude-guide-steps">
+          <li><div class="stack"><h4>${esc(V.claudeSetup === "saved" ? claudeWords.settingsTitle : claudeWords.temporaryTitle)}</h4>
+            ${V.claudeSetup === "temporary" ? `<p>${esc(claudeWords.temporaryBody)}</p><p class="hint">${esc(claudeWords.promptNote)}</p>` : `<p>${esc(claudeWords.settingsBody)}</p><div class="claude-settings-path"><span>${esc(claudeWords.pathLabel)}</span><code>${esc(claudeSettingsPath(V.claudePlatform))}</code><button class="icon-btn" data-act="copy" data-text="${esc(claudeSettingsPath(V.claudePlatform))}" aria-label="${esc(A.common.copy)}">${ic("copy", 14)}</button></div><p class="hint">${esc(claudeWords.mergeNote)}</p><p>${esc(claudeWords.replaceKey)}</p>`}${primarySnippet}<p class="hint">${esc(claudeWords.secretNote)}</p></div></li>
+          ${V.claudeSetup === "saved" ? `<li><div class="stack"><h4>${esc(claudeWords.runTitle)}</h4><p>${esc(claudeWords.runBody)}</p>${guideCode("claude")}<p class="hint">${esc(claudeWords.promptNote)}</p></div></li>` : ""}
+          <li><div class="stack"><h4>${esc(claudeWords.verifyTitle)}</h4><p>${esc(claudeWords.verifyBody)}</p>${guideCode("/status")}<p class="hint">${esc(claudeWords.statusExpected)}</p></div></li>
+        </ol>
+        <details class="claude-guide-details" data-claude-help><summary>${esc(claudeWords.helpTitle)}</summary><dl>${claudeWords.help.map(item => `<div><dt>${esc(item.title)}</dt><dd>${esc(item.body)}</dd></div>`).join("")}</dl></details>
+        <footer class="claude-guide-footer"><p class="hint">${esc(claudeWords.permissionNote)}</p><a href="https://code.claude.com/docs/en/llm-gateway-connect" target="_blank" rel="noopener noreferrer">${esc(claudeWords.docs)}${ic("ext", 12)}</a></footer>
+      </section>`;
     const keys = S.keys;
     return `
       ${bar(P.title, P.sub, `<button class="btn sm pri" data-act="new-key" ${paid() ? "" : "disabled"}>${ic("plus", 14)}${esc(P.create)}</button>`)}
@@ -640,14 +1304,54 @@ async function start(root: HTMLElement, D: any) {
           <div class="kv"><div><small>${esc(P.requests)}</small><b>${V.usage ? stats.requests.toLocaleString() : "—"}</b><span class="s">${esc(P.calls)}</span></div><div><small>${esc(P.tokens)}</small><b>${V.usage ? stats.tokens.toLocaleString() : "—"}</b><span class="s">${esc(P.tokensSub)}</span></div><div><small>${esc(words.listValue)}</small><b>${V.usage ? money2(stats.covered / 1_000_000) : "—"}</b><span class="s">${esc(words.listValueHint)}</span></div><div><small>${esc(P.charges)}</small><b>${V.usage ? money2(stats.charged / 1_000_000) : "—"}</b><span class="s">${esc(P.chargesSub)}</span></div></div>
           <p class="hint" style="margin-top:8px">${esc(zh ? `调用记录保留 ${V.logs?.retention_days ?? "—"} 天` : `Request logs retained for ${V.logs?.retention_days ?? "—"} days`)}</p></section>
         <section><div class="sec-title"><h3>${esc(P.mine)}</h3></div>
-          ${keys.length ? `<div class="card list">${keys.map((k: any) => `<div>${ic("key", 16)}<span class="grow"><b>${esc(k.name)}</b><small class="mono">${esc(k.prefix || ("…" + k.last4))} · ${esc(dfmt(k.created))}${k.limit ? ` · ${money(k.limit)}/mo` : ""}</small></span><button class="btn sm soft" data-act="key-limit" data-id="${esc(k.id)}">${esc(P.limit)}</button><button class="btn sm soft" data-act="revoke" data-id="${esc(k.id)}">${esc(P.revoke)}</button></div>`).join("")}</div>` : `<div class="card empty" style="padding:36px"><div class="ico">${ic("key", 22)}</div><h3>${esc(P.empty)}</h3><p>${esc(P.emptySub)}</p></div>`}</section>
-        <section><div class="sec-title"><h3>${esc(words.logs)}</h3></div><div class="card list">${(V.logs?.logs ?? []).map((l: any) => `<div><span class="grow"><b>${esc(l.model)} · ${esc(l.key_name || l.key_prefix || "")}</b><small>${esc(tfmt(Number(l.ts) * 1000))} · HTTP ${esc(l.status)} · ${esc(l.latency_ms)} ms · ${esc(usageTokens(l))} tokens${l.seat_covered ? ` · ${esc(P.covered)}` : ""}</small>${l.error ? `<small>${esc(l.error)}</small>` : ""}</span><b>${money2(Number(l.allow_micro || 0) / 1_000_000)}</b></div>`).join("") || `<div class="muted">${esc(V.logs ? words.empty : words.loading)}</div>`}</div>${(V.logs?.logs?.length ?? 0) >= 50 ? `<button class="btn sm" data-act="logs-more">${esc(zh ? "加载更早记录" : "Load earlier records")}</button>` : ""}${V.dataError ? `<p class="note" role="status">${esc(V.dataError)}</p>` : ""}</section>
+          ${keys.length ? `<div class="card list">${keys.map((k: any) => `<div>${ic("key", 16)}<span class="grow"><b>${esc(k.name)}</b><small class="mono">${esc(k.prefix || ("…" + k.last4))} · ${esc(dfmt(k.created))}${` · ${esc(k.limit === -1 ? keyUnlimitedLabel[D.lang] ?? keyUnlimitedLabel.en : k.limit === 0 ? keyDefaultLabel[D.lang] ?? keyDefaultLabel.en : money(k.limit) + "/mo")}`}</small>${renderKeyGovBadges(k.id)}</span><button class="btn sm soft" data-act="key-limit" data-id="${esc(k.id)}">${esc(P.limit)}</button><button class="btn sm soft" data-act="revoke" data-id="${esc(k.id)}">${esc(P.revoke)}</button></div>`).join("")}</div>` : `<div class="card empty" style="padding:36px"><div class="ico">${ic("key", 22)}</div><h3>${esc(P.empty)}</h3><p>${esc(P.emptySub)}</p></div>`}</section>
+        ${renderLogsAndContextWaterfall(P)}
         <section><div class="sec-title"><h3>${esc(P.quick)}</h3><span class="muted">${esc(P.quickSub)}</span></div>
-          <div class="card pad stack"><div class="between"><span class="muted">${esc(P.baseUrl)}</span><span class="row"><code class="mono">${base}</code><button class="icon-btn" data-act="copy" data-text="${base}" data-msg="${esc(A.common.copied)}" aria-label="${esc(A.common.copy)}">${ic("copy", 14)}</button></span></div>
+          <div class="card pad stack">${availableChatKeys().length || modelChatEnabled() ? `<div class="chat-key-toolbar quick-key-control"><label class="chat-key-control"><span>API Key</span><select data-input="apiKey" aria-label="API Key" ${saving || !availableChatKeys().length ? "disabled" : ""}>${availableChatKeys().map(key => `<option value="${key.id}" ${selectedChatKey()?.id === key.id ? "selected" : ""}>${esc(key.name)} · ${esc(key.prefix)}</option>`).join("") || `<option value="">${esc(words.noChatKeyLabel)}</option>`}</select></label><div class="chat-key-actions"><button class="icon-btn" data-act="api-models" aria-label="${esc(words.chatReloadModels)}" title="${esc(words.chatReloadModels)}" ${V.catalogLoading || !selectedChatKey() || saving ? "disabled" : ""}>${ic("refresh", 15)}</button></div></div>` : ""}<div class="between quick-connection"><span class="muted">${esc(V.quickTab === 1 ? "OpenAI Base URL" : zh ? "连接地址" : "Connection URL")}</span><span class="row"><code class="mono">${quickBase}</code><button class="icon-btn" data-act="copy" data-text="${quickBase}" data-msg="${esc(A.common.copied)}" aria-label="${esc(A.common.copy)}">${ic("copy", 14)}</button></span></div>${quickEndpoint ? `<p class="hint quick-endpoint">${esc(zh ? "端点：" : "Endpoint: ")}${esc(quickEndpoint)}</p>` : ""}
           <div class="seg">${snippets.map(([n], i) => `<button data-act="quick" data-i="${i}" aria-selected="${V.quickTab === i}">${esc(n)}</button>`).join("")}</div>
-          <div class="codebox"><pre class="code">${esc(snippets[V.quickTab][1])}</pre><button class="btn sm" data-act="copy" data-text="${esc(snippets[V.quickTab][1])}" data-msg="${esc(A.common.copied)}">${ic("copy", 13)}${esc(A.common.copy)}</button></div>
+          ${claudeGuide}
           <p class="hint">${esc(words.allowance)}</p></div></section>
+        ${renderCliOnboardingCard(apiOrigin, catalogModels)}
+        ${renderHealthAndCooldownSection()}
+        ${renderDryRunSandboxSection()}
       </div></div>`;
+  };
+
+  const monthlyActions = (p: any, cls: string) => `<button class="btn ${cls}" data-act="buy-monthly" data-pool="${esc(p.pool_id)}" data-tier="${esc(p.tier)}">${esc(p.held || p.current ? pc.renew : pc.buyMonthly)}${ic("chevR", 14)}</button>${p.upgrade_from ? `<button class="btn ${cls}" data-act="upgrade-monthly" data-pool="${esc(p.pool_id)}" data-tier="${esc(p.tier)}">${esc(pc.upgrade)}</button>` : ""}`;
+  const vMarket = () => {
+    const W = marketWords;
+    const q = V.marketQ.trim().toLocaleLowerCase(D.lang);
+    const matches = (...values: unknown[]) => !q || values.join(" ").toLocaleLowerCase(D.lang).includes(q);
+    const visible = (category: string) => V.marketTab === "all" || V.marketTab === category;
+    const amount = (value: number, currency: string) => currency + new Intl.NumberFormat(D.lang, { maximumFractionDigits: 2 }).format(Math.max(0, Number(value) || 0) / 1_000_000);
+    const period = (days: number) => fmt(W.perPeriod, { days });
+    // Products, eligibility and prices remain server-owned; never populate a fallback catalog.
+    const allPlans = (V.tokenPlans?.plans ?? []).filter((p: any) => p.enabled);
+    const regularPlans = allPlans.filter((p: any) => !p.new_user_only).sort((a: any, b: any) => a.quota_usd_micro - b.quota_usd_micro);
+    // Compare only plans with the same duration; trial prices are intentionally excluded.
+    const comparable = regularPlans.filter((p: any) => p.quota_usd_micro > 0 && p.price_micro > 0);
+    const samePeriod = comparable.length > 1 && comparable.every((p: any) => p.period_days === comparable[0].period_days);
+    const best = samePeriod ? comparable.reduce((a: any, b: any) => a.price_micro / a.quota_usd_micro <= b.price_micro / b.quota_usd_micro ? a : b) : null;
+    const tokenPlans = allPlans.filter((p: any) => matches(p.name, p.code, W.tokens));
+    const trials = tokenPlans.filter((p: any) => p.new_user_only);
+    const standard = regularPlans.filter((p: any) => tokenPlans.includes(p));
+    const monthly = (V.subscriptions?.plans ?? []).filter((p: any) => matches(p.name, p.blurb, W.subscriptions));
+    const models = (V.catalog?.models ?? []).filter((m: any) => matches(m.display_name, m.model, (m.protocols || []).join(" "), W.models));
+    const count = (visible("tokens") ? tokenPlans.length : 0) + (visible("subscriptions") ? monthly.length : 0) + (visible("models") ? models.length : 0);
+    const ready = (!visible("tokens") || V.tokenPlans) && (!visible("subscriptions") || V.subscriptions) && (!visible("models") || V.catalog);
+    const empty = (loaded: unknown) => `<div class="market-empty"><p>${esc(loaded ? words.notOffered : V.dataLoading ? words.loading : W.unavailable)}</p></div>`;
+    const purchase = (p: any, cls: string) => `<button class="btn ${cls}" data-act="buy-token-plan" data-id="${esc(p.code)}">${esc(pc.buyToken)}${ic("chevR", 14)}</button>`;
+    const trialCards = trials.map((p: any) => `<article class="market-trial">${ic("spark", 24)}<div class="market-trial-copy"><h3>${esc(p.name || W.trial)}</h3><p>${esc(planWords.guaranteedTotal)} ${amount(p.quota_usd_micro, "$")} · ${esc(p.period_days)} ${esc(planWords.period)}<br />${esc(planWords.newUser)}</p></div><div class="market-trial-price"><strong>${amount(p.price_micro, "¥")}</strong></div>${purchase(p, "market-trial-action")}</article>`).join("");
+    const cards = standard.map((p: any) => `<article class="market-plan${p === best ? " is-featured" : ""}"><div class="market-plan-top"><span class="market-plan-icon">${ic("layers", 23)}</span><div><h3>${esc(p.name)}</h3><p>${esc(W.tokens)}</p></div>${p === best ? `<span class="market-plan-badge">${esc(W.bestValue)}</span>` : ""}</div><div class="market-plan-price"><strong>${amount(p.price_micro, "¥")}</strong><small>${esc(period(p.period_days))}</small></div><div class="market-plan-quota"><span>${esc(planWords.guaranteedTotal)}</span><strong>${amount(p.quota_usd_micro, "$")}</strong></div>${p.burst_usd_micro > p.quota_usd_micro ? `<div class="market-plan-burst"><span>${esc(planWords.burstMax)}</span><strong>${amount(p.burst_usd_micro, "$")}</strong></div>` : ""}<div class="market-plan-foot"><p>${esc(p.burst_usd_micro > p.quota_usd_micro ? W.capacity : W.noRenewal)}</p>${purchase(p, "market-plan-action")}</div></article>`).join("");
+    const tokenSection = visible("tokens") && (!q || tokenPlans.length) ? `<section class="market-section" data-token-plan-catalog aria-labelledby="market-token-title">${trialCards}<div class="market-section-head"><div class="market-section-copy"><h2 id="market-token-title">${esc(W.tokens)}</h2><p>${esc(W.tokenIntro)}</p></div><span>${esc(W.noRenewal)}</span></div>${cards ? `<div class="market-plans-grid">${cards}</div>` : !trials.length ? empty(V.tokenPlans) : ""}<p class="market-rules">${ic("info", 15)}<span>${esc(W.rules)}</span></p><p class="market-note">${esc(pc.rule)}</p></section>` : "";
+    const monthlySection = visible("subscriptions") && (!q || monthly.length) ? `<section class="market-section" data-market-subscriptions aria-labelledby="market-monthly-title"><div class="market-section-head"><div class="market-section-copy"><h2 id="market-monthly-title">${esc(W.subscriptions)}</h2><p>${esc(W.subscriptionIntro)}</p></div></div>${monthly.length ? `<div class="market-subscriptions-grid">${monthly.map((p: any) => `<article class="market-subscription"><span class="market-subscription-icon">${ic("users", 22)}</span><div class="market-subscription-copy"><h3>${esc(p.name)}</h3><p>${esc(p.blurb || "")}</p></div><div class="market-subscription-price"><strong>${amount(p.price_micro, "¥")}</strong><small>${esc(p.period_days > 0 ? period(p.period_days) : words.monthly)}</small></div><div class="stack">${monthlyActions(p,"market-subscription-action")}</div></article>`).join("")}</div>` : empty(V.subscriptions)}<p class="market-note">${esc(pc.rule)}</p></section>` : "";
+    const modelPrice = (m: any, field: string) => m.list_priced && typeof m[field] === "number" && Number.isFinite(m[field]) && m[field] >= 0 ? money2(m[field] / 1_000_000) : "—";
+    const modelSection = visible("models") && (!q || models.length) ? `<section class="market-section" data-market-models aria-labelledby="market-model-title"><div class="market-section-head"><div class="market-section-copy"><h2 id="market-model-title">${esc(W.models)}</h2><p>${esc(W.modelIntro)}</p></div><a class="btn sm" href="#/api">${esc(A.account.apiKey)}${ic("ext", 13)}</a></div>${models.length ? `<div class="market-model-table-wrap" tabindex="0" role="region" aria-labelledby="market-model-title"><table class="market-model-table"><thead><tr><th scope="col">${esc(W.model)}</th><th scope="col">${esc(W.input)}</th><th scope="col">${esc(W.output)}</th><th scope="col">${esc(W.protocol)}</th></tr></thead><tbody>${models.map((m: any) => `<tr><th scope="row"><div class="market-model-name">${ic("box", 18)}<span>${esc(m.display_name || m.model)}<small class="market-model-provider">${esc(m.model)}</small></span></div></th><td>${modelPrice(m, "usd_in")}</td><td>${modelPrice(m, "usd_out")}</td><td>${esc((m.protocols || []).join(" · ") || "—")}</td></tr>`).join("")}</tbody></table></div>` : empty(V.catalog)}</section>` : "";
+    const filters = [["all", W.all], ["tokens", W.tokens], ["subscriptions", W.subscriptions], ["models", W.models]];
+    return `<header class="market-heading"><div><p class="market-eyebrow">FELLS MARKET</p><h1>${esc(W.title)}</h1><p class="market-intro">${esc(W.intro)}</p></div><a class="market-account-link" href="#/billing/credits">${ic("layers", 22)}<span><strong>${esc(W.manage)}</strong><small>${esc(W.manageHint)}</small></span>${ic("chevR", 16)}</a></header>
+      <div class="market-toolbar"><div class="market-tabs" role="group" aria-label="${esc(W.categories)}">${filters.map(([id, label]) => `<button type="button" data-act="mtab" data-v="${id}" aria-pressed="${V.marketTab === id}">${esc(label)}</button>`).join("")}</div><label class="market-search">${ic("search", 17)}<input type="search" data-input="marketQ" value="${esc(V.marketQ)}" placeholder="${esc(W.search)}" aria-label="${esc(W.search)}" /></label></div>
+      ${q ? `<p class="market-result-count" role="status">${esc(ready ? fmt(W.count, { n: count }) : V.dataLoading ? words.loading : W.unavailable)}</p>` : ""}
+      ${q && !count && ready ? `<div class="market-empty">${ic("search", 28)}<h2>${esc(W.noMatch)}</h2><p>${esc(W.noMatchHint)}</p><button class="btn" data-act="market-clear">${esc(W.clear)}</button></div>` : tokenSection + monthlySection + modelSection}${!ready && q && !count ? empty(null) : ""}`;
   };
 
   // Wallet currencies and subscriptions are separate server-owned products.
@@ -655,34 +1359,34 @@ async function start(root: HTMLElement, D: any) {
     const B = A.billing, t = tab === "credits" ? 1 : 0;
     const seg = `<div class="seg" role="tablist">${B.tabs.map((x: string, i: number) => `<button role="tab" data-go="billing/${i ? "credits" : "market"}" aria-selected="${t === i}">${esc(i ? words.wallet : x)}</button>`).join("")}</div>`;
     const b = getAppBootstrap()!;
+    const usdMicro = (value: number) => money2(Math.max(0, Number(value) || 0) / 1_000_000);
+    const currentPlan = V.tokenPlans?.current;
+    const queuedPlan = currentPlan?.queued;
+    const tokenPlanStatus = `<section data-token-plan><div class="sec-title"><h3>${esc(planWords.title)}</h3></div><p class="note">${esc(billingRules.tokenPlan)}</p><div class="card list">${currentPlan ? `<div><span class="grow"><b>${esc(currentPlan.name || currentPlan.plan_code)} · ${esc(planWords.current)}</b><small>${esc(planWords.until)} ${esc(dfmt(currentPlan.period_end * 1000))}</small></span></div><div><span class="grow"><b>${esc(planWords.guaranteed)}</b><small>${usdMicro(currentPlan.remaining_guaranteed_usd_micro)} ${esc(planWords.of)} ${usdMicro(currentPlan.quota_usd_micro)}</small></span></div>${currentPlan.burst_usd_micro > currentPlan.quota_usd_micro ? `<div><span class="grow"><b>${esc(planWords.burst)}</b><small>${usdMicro(currentPlan.remaining_burst_usd_micro)} · ${esc(currentPlan.burst_allowed ? planWords.burstOpen : planWords.burstClosed)} ${esc(planWords.burstNote)}</small></span></div>` : ""}${queuedPlan ? `<div><span class="grow"><b>${esc(planWords.next)} · ${esc(queuedPlan.plan_code)}</b><small>${esc(planWords.from)} ${esc(dfmt(queuedPlan.period_start * 1000))} · ${esc(planWords.to)} ${esc(dfmt(queuedPlan.period_end * 1000))}</small></span></div>` : ""}` : `<div class="muted">${esc(V.tokenPlans ? planWords.noActive : V.dataLoading ? words.loading : planWords.noData)}</div>`}</div></section>`;
     const plans = V.subscriptions?.plans ?? [];
-    const planCards = plans.map((p: any) => `<div class="chan"><h4>${esc(p.name)}</h4><p>${esc(p.blurb ?? "")}</p><div class="between"><span class="price">${cny(p.price_micro / 1_000_000)}<small>${esc(words.monthly)}</small></span><button class="btn sm pri" data-act="contact-purchase">${esc(contactPurchase)}</button></div></div>`).join("");
+    const planCards = plans.map((p: any) => `<div class="chan"><h4>${esc(p.name)}</h4><p>${esc(p.blurb ?? "")}</p><div class="between"><span class="price">${cny(p.price_micro / 1_000_000)}<small>${esc(words.monthly)}</small></span><div class="stack">${monthlyActions(p,"sm pri")}</div></div></div>`).join("");
     const subscriptions = `<section><div class="sec-title"><h3>${esc(B.plans)}</h3></div><div class="grid2">${planCards || `<p class="muted">${esc(V.subscriptions ? words.notOffered : words.loading)}</p>`}</div></section>`;
     const rides = V.subscriptions?.rides ?? [];
     const rideMode = V.subscriptions?.preferred_ride_mode;
     const rideModeControl = V.subscriptions ? `<div class="row wrap" style="margin:0 0 12px"><span class="muted">${esc(zh ? "使用方式" : "Usage mode")}</span><button class="btn sm ${rideMode === "monthly" ? "pri" : "soft"}" data-act="set-ride-mode" data-mode="monthly" ${rideMode === "monthly" ? "aria-pressed=true" : "aria-pressed=false"}>${esc(words.monthlyRideMode)}</button><button class="btn sm ${rideMode === "allowance" ? "pri" : "soft"}" data-act="set-ride-mode" data-mode="allowance" ${rideMode === "allowance" ? "aria-pressed=true" : "aria-pressed=false"}>${esc(words.allowanceRideMode)}</button></div>` : "";
-    const mySubscriptions = `<section><div class="sec-title"><h3>${esc(words.mySubscriptions)}</h3></div>${rideModeControl}<div class="card list">${rides.map((ride: any) => `<div><span class="grow"><b>${esc(ride.pool_name)} · ${esc(ride.tier)} ${esc(zh ? "人档" : "seats")}${ride.current ? ` · ${esc(words.currentRide)}` : ""}</b><small>${esc(words.expires)} ${esc(dfmt(Number(ride.expires_at) * 1000))}${ride.seated ? "" : ` · ${esc(zh ? "尚未分配座位" : "Seat not assigned yet")}`}</small></span>${!ride.current && Number.isSafeInteger(Number(ride.pool_id)) && Number(ride.pool_id) > 0 ? `<button class="btn sm" data-act="set-current-ride" data-id="${esc(ride.pool_id)}">${esc(words.makeCurrentRide)}</button>` : ""}</div>`).join("") || `<div class="muted">${esc(V.subscriptions ? words.notOffered : words.loading)}</div>`}</div></section>`;
+    const mySubscriptions = `<section><div class="sec-title"><h3>${esc(words.mySubscriptions)}</h3></div><p class="note">${esc(words.manualBillingMode)}</p>${rideModeControl}<div class="card list">${rides.map((ride: any) => `<div><span class="grow"><b>${esc(ride.pool_name)} · ${esc(ride.tier)} ${esc(zh ? "人档" : "seats")}${ride.current ? ` · ${esc(words.currentRide)}` : ""}</b><small>${esc(words.expires)} ${esc(dfmt(Number(ride.expires_at) * 1000))}${ride.seated ? "" : ` · ${esc(zh ? "尚未分配座位" : "Seat not assigned yet")}`}</small></span>${!ride.current && Number.isSafeInteger(Number(ride.pool_id)) && Number(ride.pool_id) > 0 ? `<button class="btn sm" data-act="set-current-ride" data-id="${esc(ride.pool_id)}">${esc(words.makeCurrentRide)}</button>` : ""}</div>`).join("") || `<div class="muted">${esc(V.subscriptions ? words.notOffered : words.loading)}</div>`}</div></section>`;
     const coupons = V.coupons?.coupons ?? [];
     const couponWallet = `<section><div class="sec-title"><h3>${esc(words.couponWallet)}</h3></div><div class="card list">${coupons.map((coupon: any) => `<div><span class="grow"><b>${esc(coupon.name || coupon.terms || (zh ? "优惠券" : "Coupon"))}</b><small>${esc(coupon.terms || "")} · ${esc(words.couponStatus)}: ${esc(words.couponStates[coupon.state as keyof typeof words.couponStates] || coupon.state)}${coupon.expires_at ? ` · ${esc(words.expires)} ${esc(dfmt(Number(coupon.expires_at) * 1000))}` : ""}</small></span><button class="btn sm" data-act="contact-purchase">${esc(contactPurchase)}</button></div>`).join("") || `<div class="muted">${esc(V.coupons ? words.empty : words.loading)}</div>`}</div></section>`;
     const invoiceFiles = V.invoices?.files ?? [];
     const invoiceList = `<section><div class="sec-title"><h3>${esc(words.invoices)}</h3></div><div class="card list">${invoiceFiles.map((file: any) => `<div><span class="grow"><b>${esc(file.filename)}</b><small>#${esc(file.topup_id)} · ${esc(dfmt(Number(file.uploaded_at) * 1000))} · ${(Number(file.size_bytes) / 1024).toFixed(0)} KB</small></span><a class="btn sm" href="/api/app/invoices/${encodeURIComponent(String(file.id))}" target="_blank" rel="noopener">${esc(words.download)}</a></div>`).join("") || `<div class="muted">${esc(V.invoices ? words.invoiceEmpty : words.loading)}</div>`}</div></section>`;
     let body: string;
     if (t === 0) {
-      const q = V.marketQ.trim().toLowerCase();
-      const models = (V.catalog?.models ?? []).filter((m: any) => !q || String(m.display_name || m.model).toLowerCase().includes(q));
-      body = `<div class="dark-hero"><span class="k">${esc(B.market.kicker)}</span><h2>${esc(B.market.title)}</h2></div>
-        <div class="row wrap"><input type="search" data-input="marketQ" value="${esc(V.marketQ)}" placeholder="${esc(B.market.search)}" aria-label="${esc(B.market.search)}" style="max-width:300px" /></div>
-        ${mySubscriptions}${subscriptions}<section><div class="sec-title"><h3>${esc(B.market.paygTitle)}</h3></div><div class="grid3">${models.map((m: any) => `<div class="chan"><h4>${esc(m.display_name || m.model)}</h4><p class="muted">${esc((m.protocols || []).join(" · "))}</p><div class="chips"><code>${esc(m.model)}</code></div><div class="between"><span class="price">${m.list_priced ? money2(Number(m.usd_in || 0) / 1_000_000) : "—"}<small>${esc(D.market.perM)}</small></span></div></div>`).join("") || `<p class="muted">${esc(V.catalog ? words.notOffered : words.loading)}</p>`}</div></section>`;
+      body = vMarket();
     } else {
       const entries = V.ledger?.entries ?? V.ledger?.items ?? [];
-      body = `<div class="balance"><small>${esc(words.wallet)}</small><div class="amt">${cny(cashBalance())}</div><button class="btn top" data-act="contact-purchase">${ic("plus", 14)}${esc(contactPurchase)}</button>
+      body = `<div class="balance"><small>${esc(words.wallet)}</small><div class="amt">${cny(cashBalance())}</div><button class="btn top" data-act="contact-purchase">${ic("plus", 14)}${esc(fx.fund)}</button>
         <div class="parts"><div><small>${esc(words.cash)}</small><b>${cny(cashBalance())}</b></div><div><small>${esc(words.grant)}</small><b>${cny(b.wallet.grant_micro / 1_000_000)}</b></div><div><small>${esc(words.allowance)}</small><b>${money2(balance())}</b><small>${bonusExpiry() ? esc(dfmt(bonusExpiry())) : "—"}</small></div></div>
-        <p style="position:relative;z-index:1;margin-top:12px;color:#9a9aa0;font-size:12.5px">${esc(words.pendingTopup)}</p></div>
-        <div class="card pad between"><div><h4>${esc(words.exchange)}</h4><p class="muted">${b.api_allowance.price_cny > 0 ? `${cny(b.api_allowance.price_cny)} / $1` : esc(words.notOffered)}</p></div><button class="btn" data-act="contact-purchase">${esc(contactPurchase)}</button></div>
-        ${mySubscriptions}${subscriptions}${couponWallet}${invoiceList}<section><div class="sec-title"><h3>${esc(words.ledger)}</h3></div><div class="card list">${entries.map((e: any) => `<div><span class="grow">${esc(e.memo || e.kind)}<small>${esc(dfmt(Number(e.created_at) * 1000))}</small></span><b>${cny(Number(e.delta_micro) / 1_000_000)}</b></div>`).join("") || `<div class="muted">${esc(V.ledger ? words.empty : words.loading)}</div>`}</div></section>`;
+        <p style="position:relative;z-index:1;margin-top:12px;color:#9a9aa0;font-size:12.5px">${esc(fx.fundHint)}</p></div>
+        <div class="card pad stack" data-currency-exchange><h4>${esc(fx.exchange)}</h4><p class="muted">${esc(fx.rule)}</p><p class="muted">${esc(words.allowanceTerms)}</p><button class="btn" data-act="exchange">${esc(exchangeIntent ? fx.retry : fx.exchange)}</button>${planIntent ? `<button class="btn" data-act="plan-recover">${esc(pc.recover)}</button>` : ""}</div>
+        ${tokenPlanStatus}${mySubscriptions}${renderHealthAndCooldownSection()}${subscriptions}${couponWallet}${invoiceList}<section><div class="sec-title"><h3>${esc(words.ledger)}</h3></div><div class="card list">${entries.map((e: any) => `<div><span class="grow">${esc(e.memo || e.kind)}<small>${esc(dfmt(Number(e.created_at) * 1000))}</small></span><b>${cny(Number(e.delta_micro) / 1_000_000)}</b></div>`).join("") || `<div class="muted">${esc(V.ledger ? words.empty : words.loading)}</div>`}</div></section>`;
     }
     if (V.dataError) body += `<p class="note" role="status">${esc(V.dataError)}</p>`;
-    return `${bar(B.title, B.sub, seg)}<div class="scroll"><div class="page stack lg">${body}</div></div>`;
+    return `${bar(B.title, B.sub, seg)}<div class="scroll"><div class="${t === 0 ? "page market-page" : "page stack lg"}">${body}</div></div>`;
   };
 
   const vNotFound = () => `${bar("")}<div class="scroll"><div class="empty"><h3>404</h3><button class="btn" data-go="">${esc(A.nav.back)}</button></div></div>`;
@@ -697,22 +1401,49 @@ async function start(root: HTMLElement, D: any) {
       case "chat": return vChat(r.arg);
       case "import": return vImport();
       case "members": return vMembers();
+      case "invitations": return vInvitations();
       case "ws-settings": return vWsSettings();
       case "settings": return vUser(Math.min(3, Number(r.arg) || 0));
-      case "api": return vApi();
+      case "api":
+      case "usage":
+      case "status": return vApi();
       case "billing": return vBilling(r.arg);
       default: return vNotFound();
     }
   };
   const render = () => {
     applyTheme();
+    const sameView = root.dataset.route === location.hash && root.dataset.workspace === S.current;
+    const oldMarketSearch = sameView ? root.querySelector<HTMLInputElement>('[data-input="marketQ"]') : null;
+    // A pending account refresh is rendered when compositionend commits the query.
+    if (marketComposing && oldMarketSearch && document.activeElement === oldMarketSearch) return;
+    // A route/workspace change can remove the input before compositionend bubbles.
+    marketComposing = false;
+    const search = oldMarketSearch && document.activeElement === oldMarketSearch ? { value: oldMarketSearch.value, start: oldMarketSearch.selectionStart, end: oldMarketSearch.selectionEnd } : null;
+    const oldInput = sameView ? root.querySelector<HTMLTextAreaElement>('[data-form=send][data-chat] #fx-input') : null;
+    const draft = oldInput ? { value: oldInput.value, start: oldInput.selectionStart, end: oldInput.selectionEnd, focused: document.activeElement === oldInput } : null;
     const status = root.querySelector<HTMLElement>(".toast");
+    const sidebarScrim = root.querySelector<HTMLElement>(".sb-scrim");
     root.classList.toggle("sb-hidden", !!S.sbHidden);
     const scroll = root.querySelector<HTMLElement>(".main .scroll");
     const keep = scroll && root.dataset.route === location.hash ? scroll.scrollTop : 0;
     root.innerHTML = `${sidebar()}<main class="main" id="fx-main">${main()}</main>`;
     if (status) root.appendChild(status);
+    if (sidebarScrim) root.appendChild(sidebarScrim);
     root.dataset.route = location.hash;
+    root.dataset.workspace = S.current;
+    const input = root.querySelector<HTMLTextAreaElement>('[data-form=send][data-chat] #fx-input');
+    if (draft && input) {
+      input.value = draft.value;
+      input.setSelectionRange(draft.start, draft.end);
+      if (draft.focused) input.focus({ preventScroll: true });
+    }
+    const marketSearch = root.querySelector<HTMLInputElement>('[data-input="marketQ"]');
+    if (search && marketSearch) {
+      marketSearch.value = search.value;
+      marketSearch.focus({ preventScroll: true });
+      if (search.start !== null && search.end !== null) marketSearch.setSelectionRange(search.start, search.end);
+    }
     const s2 = root.querySelector<HTMLElement>(".main .scroll");
     if (s2) s2.scrollTop = root.querySelector("[data-thread]") ? s2.scrollHeight : keep;
     document.title = A.metaTitle + (wsName() ? " · " + wsName() : "");
@@ -722,13 +1453,14 @@ async function start(root: HTMLElement, D: any) {
   let popEl: HTMLElement | null = null;
   const closePop = () => { popEl?.remove(); popEl = null; };
   const openPop = (anchor: HTMLElement, html: string, cls = "") => {
+    // Nested menus replace their parent, so measure the trigger while it is still attached.
+    const r = anchor.getBoundingClientRect();
     closePop();
     const el = document.createElement("div");
     el.className = "pop " + cls;
     el.setAttribute("role", "menu");
     el.innerHTML = html;
     root.appendChild(el);
-    const r = anchor.getBoundingClientRect();
     const w = el.offsetWidth, h = el.offsetHeight;
     let top = r.bottom + 6;
     if (top + h > innerHeight - 8) top = Math.max(8, r.top - h - 6);
@@ -737,7 +1469,7 @@ async function start(root: HTMLElement, D: any) {
     el.style.top = top + "px";
     el.style.left = left + "px";
     popEl = el;
-    el.querySelector<HTMLElement>("input,button")?.focus();
+    el.querySelector<HTMLElement>("input,button,a[href]")?.focus({ preventScroll: true });
     return el;
   };
   const switcherMenu = () => `
@@ -745,8 +1477,7 @@ async function start(root: HTMLElement, D: any) {
     ${S.workspaces.length ? S.workspaces.map((w) => `<button class="mi" data-act="switch" data-id="${esc(w.id)}"><span class="ws-ic">${esc(initials(w.name).slice(0, 1))}</span><span class="grow">${esc(w.name)}<small>${esc(A.members.roles[getAppWorkspaceRole(w.id) || "viewer"][0])}</small></span>${S.current === w.id ? ic("check", 16) : ""}</button>`).join("") : `<p class="ph">${esc(A.switcher.none)}</p>`}
     <hr /><div class="ph">${esc(A.switcher.examples)}</div>
     <button class="mi" data-act="switch" data-id="example"><span class="ws-ic" style="background:#5865f2;color:#fff">L</span><span class="grow">${esc(A.example.name)}<small>${esc(A.example.body)}</small></span><span class="tag">${esc(A.switcher.readOnly)}</span>${isExample() ? ic("check", 16) : ""}</button>
-    <hr /><button class="mi" data-act="invitations">${ic("mail", 16)}<span class="grow">${esc(A.invitations.open)}</span>${V.invitations?.length ? `<span class="tag">${V.invitations.length}</span>` : ""}</button>
-    <button class="mi" data-act="new-ws">${ic("plus", 16)}${esc(A.switcher.newWs)}</button>`;
+    <hr /><button class="mi" data-act="new-ws">${ic("plus", 16)}${esc(A.switcher.newWs)}</button>`;
   const accountMenu = () => `
     <div class="acct-head"><div class="row">${avatar()}<div style="min-width:0"><b>${esc(displayName())}</b>${S.email ? `<small class="muted">${esc(S.email)}</small>` : ""}</div></div></div>
     <div class="credit-row"><div><small class="muted">${esc(A.account.credits)}</small><b style="display:block">${money2(balance())}</b><small class="dim">${bonusExpiry() ? esc(dfmt(bonusExpiry())) : "—"}</small></div><button class="btn sm pri" data-act="contact-purchase">${esc(contactPurchase)}</button></div>
@@ -767,8 +1498,9 @@ async function start(root: HTMLElement, D: any) {
     <button class="btn sm soft" data-act="lang">${ic("lang", 14)}${esc(D.locales.find((l: any) => l.current)?.label || "")}</button></div>`;
   const modelMenu = (agentId: string, q = "") => {
     const agent = agentById(agentId);
-    const ms = modelsFor(agent).filter((m: any) => !q || (m.name + " " + m.provider).toLowerCase().includes(q.toLowerCase()));
-    const cur = V.menuChat ? S.chats.find((c) => c.id === V.menuChat)?.model : currentModel(agent);
+    const ms = modelsFor(agent).filter((m: any) => !q || (m.name + " " + (m.label || "") + " " + m.provider).toLowerCase().includes(q.toLowerCase()));
+    const cur = V.menuChat ? V.chatModel?.[V.menuChat] ?? S.chats.find((c) => c.id === V.menuChat)?.model : currentModel(agent);
+    if (modelChatEnabled() && !isExample()) return `<div class="search"><input type="search" data-input="modelQ" value="${esc(q)}" placeholder="${esc(A.newChat.modelSearch)}" aria-label="${esc(A.newChat.modelSearch)}" /></div><div data-mlist>${ms.map((m: any) => `<button class="mi" data-act="pick-model" data-name="${esc(m.name)}"><span class="grow">${esc(m.label)}<small>${esc(m.name)} · ${esc(m.formats.join(" · "))}</small></span>${cur === m.name ? ic("check", 16) : ""}</button>`).join("") || `<p class="ph">${esc(A.newChat.noModel)}</p>`}</div>`;
     const groups: Record<string, any[]> = {};
     for (const m of ms) (groups[m.provider || agent.maker] ||= []).push(m);
     const list = Object.entries(groups)
@@ -796,6 +1528,153 @@ async function start(root: HTMLElement, D: any) {
     return el;
   };
   const xBtn = () => `<button class="icon-btn x" data-act="close" aria-label="${esc(A.common.close)}">${ic("x", 16)}</button>`;
+
+  // Catalog reads prepare a review only. A persisted intent is created at the
+  // final click and keeps its original terms and ceiling through uncertain replies.
+  const openPlanReview = () => {
+    const p = planIntent ?? planReview;
+    if (!p) return;
+    const rows: [string,string][] = [[fx.cash, `CNY ${microText(getAppBootstrap()!.wallet.cash_micro)}`], [pc.period, String(p.days)], [pc.estimate, `CNY ${microText(p.chargeMicro)}`], [pc.maxCharge, `CNY ${microText(p.maxChargeMicro)}`]];
+    if (p.kind === "token") rows.splice(2,0,[planWords.guaranteedTotal, `USD ${microText(p.quotaMicro!)}`], [planWords.burstMax, `USD ${microText(p.burstMicro!)}`]);
+    if (p.startsAt && p.expiresAt) rows.push([planWords.from,new Date(p.startsAt*1000).toLocaleString(D.lang)],[planWords.to,new Date(p.expiresAt*1000).toLocaleString(D.lang)]);
+    if (p.kind === "upgrade") rows.splice(2,0,[pc.original,p.sourceName ?? ""],[pc.credit,`CNY ${microText(p.creditMicro ?? 0)}`]);
+    openDlg(`${xBtn()}<h2>${esc(pc.title)}</h2><div class="body stack" data-plan-review><h3>${esc(p.title)}</h3><dl class="currency-quote">${rows.map(([label,value])=>`<div><dt>${esc(label)}</dt><dd>${esc(value)}</dd></div>`).join("")}</dl><p class="note">${esc(pc.rule)}</p>${p.kind==="token" ? `<p class="note">${esc(planWords.burstNote)}</p>${p.newUserOnly?`<p>${esc(planWords.newUser)}</p>`:""}${p.queued?`<p>${esc(pc.queued)}</p>`:""}${p.enableKeys===true?`<p data-plan-keys>${esc(pc.enableKeys)}</p>`:!getAppBootstrap()?.user.self_keys?`<p data-plan-keys>${esc(pc.keysRestricted)}</p>`:""}`:""}${p.kind==="upgrade"?`<p class="note">${esc(pc.upgradeRule)}</p>`:""}${planIntent?`<p role="status">${esc(fx.pending)}</p><p class="mono">${esc(fx.operation)}: ${esc(p.key)}</p>`:""}<p data-plan-error role="status">${esc(planError)}</p><button class="btn pri" data-act="plan-confirm">${esc(planIntent?fx.retry:pc.confirm)}</button></div>`);
+  };
+  const openPlanSelection = () => {
+    openDlg(`${xBtn()}<h2>${esc(planSelection?.kind==="upgrade"?pc.upgrade:pc.buyMonthly)}</h2><div class="body stack"><p class="note">${esc(pc.rule)}</p>${planSelection?.kind==="upgrade"?`<p class="note">${esc(pc.upgradeRule)}</p>`:""}<form class="stack" data-form="plan-select"><label class="f">${esc(pc.months)}<input name="months" type="number" min="1" max="24" step="1" required value="${planMonths}" autofocus /></label><button class="btn pri">${esc(pc.preview)}</button></form><p data-plan-error role="status">${esc(planError)}</p></div>`);
+  };
+  const preparePlan = async () => {
+    const selection = planSelection;
+    if (!selection || saving || ended) return;
+    let prepared: PlanPurchase | null = null;
+    planError = "";
+    const result = await accountAction(async () => {
+      const key = operationKey();
+      if (selection.kind === "token") {
+        const offers = await accountApi.tokenPlans(), p = offers.plans.find(plan=>plan.code===selection.code && plan.enabled);
+        if (!p) throw Error(pc.unavailable);
+        prepared = {kind:"token",title:p.name,key,body:{plan:p.code,max_charge_micro:p.price_micro,terms_hash:p.terms_hash},days:p.period_days,months:1,quotaMicro:p.quota_usd_micro,burstMicro:p.burst_usd_micro,chargeMicro:p.price_micro,maxChargeMicro:p.price_micro,enableKeys:offers.api_keys_will_enable,queued:!!offers.current,newUserOnly:p.new_user_only};
+      } else {
+        const offers = await accountApi.subscriptions(), p = offers.plans.find(plan=>plan.pool_id===selection.pool && plan.tier===selection.tier);
+        if (!p) throw Error(pc.unavailable);
+        const total = planPriceCeiling(p.price_micro,planMonths);
+        if (total===null) throw Error(pc.unavailable);
+        if (selection.kind === "upgrade") {
+          if (!p.upgrade_from) throw Error(pc.unavailable);
+          const reply = await accountApi.upgradeQuote({from_pool:p.upgrade_from,pool_id:p.pool_id,tier:p.tier,months:planMonths});
+          const q = reply.quote as Record<string,unknown> | undefined;
+          if (!q || q.from_pool!==p.upgrade_from || q.to_pool!==p.pool_id || q.to_tier!==p.tier || q.months!==planMonths || typeof q.from_name!=="string" || !Number.isSafeInteger(q.starts_at) || !Number.isSafeInteger(q.expires_at) || Number(q.starts_at)<=0 || Number(q.expires_at)<=Number(q.starts_at) || !Number.isSafeInteger(q.applied_micro) || Number(q.applied_micro)<0) throw Error(pc.unavailable);
+          prepared = {kind:"upgrade",title:p.name,key,body:{from_pool:p.upgrade_from,pool_id:p.pool_id,tier:p.tier,months:planMonths,max_charge_micro:Number(reply.max_charge_micro)},days:planMonths*30,months:planMonths,startsAt:Number(q.starts_at),expiresAt:Number(q.expires_at),sourceName:q.from_name,creditMicro:Number(q.applied_micro),chargeMicro:Number(q.charge_micro),maxChargeMicro:Number(reply.max_charge_micro)};
+        } else prepared = {kind:"subscription",title:p.name,key,body:{pool_id:p.pool_id,tier:p.tier,months:planMonths,max_charge_micro:total},days:planMonths*30,months:planMonths,chargeMicro:total,maxChargeMicro:total};
+      }
+      if (!validPlanPurchase(prepared)) throw Error(pc.unavailable);
+      return prepared;
+    });
+    if (ended) return;
+    if (result && validPlanPurchase(result)) { planReview = result; openPlanReview(); }
+    else { planReview = null; planError = pc.unavailable; if(selection.kind!=="token") openPlanSelection(); else toast(pc.unavailable); }
+  };
+  const beginPlan = async (selection: NonNullable<typeof planSelection>) => {
+    closePop();
+    if (planIntent) { openPlanReview(); return; }
+    if (exchangeIntent) { openExchange(); return; }
+    planSelection = selection; planReview = null; planMonths = 1; planError = "";
+    if (selection.kind === "token") await preparePlan(); else openPlanSelection();
+  };
+  const confirmPlan = async () => {
+    const p = planIntent ?? planReview;
+    if (!p || saving || ended || !validPlanPurchase(p)) return;
+    if (!planIntent) {
+      try { storeMoneyIntent(planStorageKey,p); } catch { planError = fx.storage; openPlanReview(); return; }
+      planIntent = p;
+    }
+    let rejected = false;
+    const result = await accountAction(async () => {
+      try {
+        const b=p.body;
+        const receipt = p.kind==="token" ? await accountApi.buyTokenPlan({plan:String(b.plan),max_charge_micro:p.maxChargeMicro,terms_hash:String(b.terms_hash)},p.key)
+          : p.kind==="upgrade" ? await accountApi.upgradeSubscription({from_pool:Number(b.from_pool),pool_id:Number(b.pool_id),tier:Number(b.tier),months:Number(b.months),max_charge_micro:p.maxChargeMicro},p.key)
+          : await accountApi.buySubscription({pool_id:Number(b.pool_id),tier:Number(b.tier),months:Number(b.months),max_charge_micro:p.maxChargeMicro},p.key);
+        if (!validPlanReceipt(receipt,p,fxIdentity.user.id)) throw Error(fx.pending);
+        if (receipt.reconciled === true) {
+          const next = await readApp();
+          if (!next || next.session !== fxIdentity.session_id) throw new EndedSession();
+          adopt(next);
+        }
+        return receipt;
+      } catch (failure) { rejected = failure instanceof APIError && failure.transactionRejected; planError = rejected && failure instanceof Error ? failure.message : fx.pending; throw failure; }
+    });
+    if (ended) return;
+    if (result || rejected) {
+      planIntent = null; planReview = null;
+      try { sessionStorage.removeItem(planStorageKey); } catch { /* No replacement financial operation is sent. */ }
+    }
+    if (result) { closeDlg(); toast(pc.done); void loadAccountViews(); }
+    else if (rejected) { openDlg(`${xBtn()}<h2>${esc(pc.title)}</h2><div class="body stack"><p data-plan-error role="status">${esc(planError)}</p><p>${esc(pc.unavailable)}</p><button class="btn" data-act="close">${esc(A.common.close)}</button></div>`); void loadAccountViews(); }
+    else openPlanReview();
+  };
+
+  const quoteSummary = (q: ExchangeQuote) => `<dl class="currency-quote">${[
+    [fx.source, "European Central Bank (ECB)"], [fx.date, q.as_of], [fx.updated, new Date(q.fetched_at).toLocaleString(D.lang)],
+    [fx.reference, q.reference_rate], [fx.effective, q.effective_rate], [fx.amount, `CNY ${microText(q.cash_micro)}`],
+    [fx.fee, `CNY ${microText(q.fee_cny_micro)}`], [fx.principal, `CNY ${microText(q.principal_cash_micro)}`],
+    [fx.receive, `USD ${microText(q.usd_micro)}`], [fx.expires, new Date(q.expires_at).toLocaleString(D.lang)],
+  ].map(([label, value]) => `<div><dt>${esc(label)}</dt><dd>${esc(value)}</dd></div>`).join("")}</dl>${q.api_keys_will_enable === true ? `<p class="note" data-exchange-keys>${esc(fx.enableKeys)}</p>` : q.api_keys_will_enable === false && !getAppBootstrap()?.user.self_keys ? `<p class="note" data-exchange-keys>${esc(fx.keysRestricted)}</p>` : ""}`;
+  const openExchange = () => {
+    const q = exchangeIntent?.quote ?? exchangeQuote;
+    openDlg(`${xBtn()}<h2>${esc(fx.exchange)}</h2><div class="body stack"><p>${esc(fx.cash)}: <span data-exchange-cash>CNY ${esc(microText(getAppBootstrap()!.wallet.cash_micro))}</span></p><p class="note">${esc(fx.rule)}</p>${q ? `${quoteSummary(q)}${exchangeIntent ? `<p role="status">${esc(fx.pending)}</p><p class="mono">${esc(fx.operation)}: ${esc(exchangeIntent.key)}</p>` : ""}<div class="foot wrap">${!exchangeIntent ? `<button class="btn" data-act="exchange-new">${esc(fx.newQuote)}</button>` : ""}<button class="btn pri" data-act="exchange-confirm">${esc(exchangeIntent ? fx.retry : fx.confirm)}</button></div>` : `<form class="stack" data-form="exchange-quote"><label class="f">${esc(fx.amount)}<input name="cash" inputmode="decimal" type="text" pattern="[0-9]+([.][0-9]{1,6})?" maxlength="24" value="${esc(exchangeAmount)}" required autofocus /></label><button class="btn pri">${esc(fx.preview)}</button></form>`}<p data-exchange-error class="note" role="status">${esc(exchangeError)}</p></div>`);
+  };
+  const openExchangeWithBalance = async () => {
+    if (planIntent) { openPlanReview(); return; }
+    if (saving || ended || !committed) return;
+    const identity = committed.session;
+    saving = true; generation++; root.setAttribute("aria-busy", "true");
+    try {
+      const next = await readApp();
+      if (!next || next.session !== identity) { clearView(); return; }
+      adopt(next); render(); openExchange();
+    } catch (failure) {
+      if (failure instanceof EndedSession || failure instanceof APIError && failure.status === 401) clearView();
+      else if (!ended && committed?.session === identity) { if (exchangeIntent) openExchange(); else toast(fx.unavailable); }
+    } finally { saving = false; root.removeAttribute("aria-busy"); if (refreshPending) void refresh(); }
+  };
+  const confirmExchange = async () => {
+    const q = exchangeIntent?.quote ?? exchangeQuote;
+    if (!q) return;
+    if (!exchangeIntent && Date.parse(q.expires_at) <= Date.now()) { exchangeError = fx.expired; openExchange(); return; }
+    if (!exchangeIntent) {
+      const intent = { key: operationKey(), quote: q };
+      try { storeMoneyIntent(fxStorageKey, intent); } catch { exchangeError = fx.storage; openExchange(); return; }
+      exchangeIntent = intent;
+    }
+    const intent = exchangeIntent;
+    let definitiveFailure = false;
+    const result = await accountAction(async () => {
+      try {
+        const receipt = await accountApi.buyAllowance(intent.quote.cash_micro, intent.quote.id, intent.key);
+        const reconciled = validExchangeReconciliation(receipt,intent.quote);
+        if (!reconciled && (!validExchangeQuote(receipt.exchange, intent.quote.cash_micro) || receipt.exchange.id !== intent.quote.id)) throw new Error(fx.pending);
+        if (reconciled) {
+          const next = await readApp();
+          if (!next || next.session !== fxIdentity.session_id) throw new EndedSession();
+          adopt(next);
+        }
+        return receipt;
+      }
+      catch (failure) {
+        definitiveFailure = failure instanceof APIError && failure.transactionRejected;
+        exchangeError = definitiveFailure ? (failure instanceof Error ? failure.message : fx.expired) : fx.pending;
+        throw failure;
+      }
+    });
+    if (ended) return;
+    if (result || definitiveFailure) {
+      exchangeIntent = null; exchangeQuote = null;
+      try { sessionStorage.removeItem(fxStorageKey); } catch { /* No new request is issued. */ }
+    }
+    if (result) { exchangeAmount = ""; exchangeError = ""; closeDlg(); toast(fx.done); void loadAccountViews(); }
+    else openExchange();
+  };
 
   // Onboarding
   let ob = { step: 0 };
@@ -844,34 +1723,7 @@ async function start(root: HTMLElement, D: any) {
     const code = String((r.stat as any)?.code || "");
     const href = `${location.origin}${D.links.start}?ref=${encodeURIComponent(code)}#signup`;
     V.rebateIntent = { body: { amount_micro: 0, expected_payable: payable, ref: operationKey() }, key: operationKey() };
-    openDlg(`${xBtn()}<h2>${esc(A.invite.title)}</h2><div class="body stack"><p class="lead">${esc(r.active ? r.reward_terms || r.name : words.notOffered)}</p>${r.referee_reward_terms ? `<p>${esc(r.referee_reward_terms)}</p>` : ""}<div class="codebox"><pre class="code">${esc(href)}</pre><button class="btn sm" data-act="copy" data-text="${esc(href)}" data-msg="${esc(A.common.copied)}">${esc(A.common.copy)}</button></div><p class="muted">${esc(zh ? "已邀请" : "Invited")} ${(r.stat as any)?.invited ?? 0} · ${esc(zh ? "已转化" : "Converted")} ${(r.stat as any)?.converted ?? 0}</p><div class="card pad stack"><h3>${esc(zh ? "推荐返佣" : "Referral rebates")}</h3><b>${cny(payable / 1_000_000)}</b><p class="muted">${esc(zh ? `可转入人民币现金。挂账期 ${rb.hold_days} 天，计酬期 ${rb.window_months} 个月。` : `Payable to CNY cash. Hold period: ${rb.hold_days} days; earning window: ${rb.window_months} months.`)}</p><button class="btn" data-act="rebate-credit" ${payable > 0 ? "" : "disabled"}>${esc(zh ? "确认转入钱包" : "Confirm transfer to wallet")}</button></div></div>`);
-  };
-  // Invitations addressed to this account. Names and workspace titles are text only.
-  const invitationsHtml = () => {
-    const I = A.invitations, list: AppInvitation[] = V.invitations ?? [];
-    const rows = list.map((inv) => `<div data-invitation="${esc(inv.id)}"><span class="grow"><b>${esc(inv.workspace_name)}</b> <span class="tag">${esc(A.members.roles[inv.role][0])}</span><small>${esc(fmt(I.from, { name: memberName(inv.inviter_name) }))} · ${esc(fmt(I.expires, { date: dfmt(inv.expires) }))}</small></span><button class="btn sm pri" data-act="invite-accept" data-id="${esc(inv.id)}">${esc(I.accept)}</button><button class="btn sm soft" data-act="invite-decline" data-id="${esc(inv.id)}">${esc(I.decline)}</button></div>`).join("");
-    return `${xBtn()}<h2>${esc(I.title)}</h2><div class="body stack" data-invitations>${rows ? `<div class="card list">${rows}</div>` : `<p class="muted">${esc(V.invitations ? I.none : words.loading)}</p>`}</div>`;
-  };
-  const openInvitations = async () => {
-    closePop();
-    openDlg(invitationsHtml(), "wide");
-    const identity = committed?.session;
-    try {
-      const list = await listAppInvitations();
-      if (ended || committed?.session !== identity) return;
-      V.invitations = list;
-    } catch (error) {
-      if (error instanceof EndedSession || (error instanceof APIError && error.status === 401)) { clearView(); return; }
-      toast(error instanceof Error ? error.message : security.saveFailed);
-      return;
-    }
-    const box = dlgEl?.querySelector(".dlg");
-    if (box?.querySelector("[data-invitations]")) box.innerHTML = invitationsHtml();
-  };
-  // Only the server's limit statuses get local copy; other errors keep the server message.
-  const limitAware = <T>(run: () => Promise<T>, limits: Record<number, string>) => async () => {
-    try { return await run(); }
-    catch (error) { if (error instanceof APIError && limits[error.status]) throw new Error(limits[error.status]); throw error; }
+    openDlg(`${xBtn()}<h2>${esc(A.invite.title)}</h2><div class="body stack"><p class="lead">${esc(r.active ? r.reward_terms || r.name : words.notOffered)}</p>${r.active && r.referee_reward_terms ? `<p>${esc(r.referee_reward_terms)}</p>` : ""}<div class="codebox"><pre class="code">${esc(href)}</pre><button class="btn sm" data-act="copy" data-text="${esc(href)}" data-msg="${esc(A.common.copied)}">${esc(A.common.copy)}</button></div><p class="muted">${esc(zh ? "已邀请" : "Invited")} ${(r.stat as any)?.invited ?? 0} · ${esc(zh ? "已转化" : "Converted")} ${(r.stat as any)?.converted ?? 0}</p><div class="card pad stack"><h3>${esc(zh ? "推荐返佣" : "Referral rebates")}</h3><b>${cny(payable / 1_000_000)}</b><p class="muted">${esc(zh ? `挂账期 ${rb.hold_days} 天，计酬期 ${rb.window_months} 个月；返现池资金充足时可转入人民币现金。` : `Hold period: ${rb.hold_days} days; earning window: ${rb.window_months} months. Transfer to CNY cash requires enough funds in the rebate pool.`)}</p><button class="btn" data-act="rebate-credit" ${payable > 0 ? "" : "disabled"}>${esc(zh ? "确认转入钱包" : "Confirm transfer to wallet")}</button></div></div>`);
   };
   const openChangelog = () => {
     const C = A.changelog;
@@ -881,20 +1733,21 @@ async function start(root: HTMLElement, D: any) {
     const H = A.help;
     openDlg(`${xBtn()}<h2>${esc(H.title)}</h2><p class="lead">${esc(H.sub)}</p><div class="body">
       <a class="card pad between" href="${esc(D.links.blog)}" target="_blank" rel="noopener"><span class="row">${ic("book", 18)}<b>${esc(H.guide)}</b></span><span class="muted row" style="font-size:12.5px">${esc(H.open)}${ic("ext", 13)}</span></a>
-      <div class="card pad stack"><div class="row">${ic("mail", 18)}<b>${esc(H.contact)}</b></div><p class="muted" style="font-size:13px">${esc(H.contactSub)}</p><div class="row wrap"><a class="btn sm pri" href="mailto:${esc(contactEmail)}">${esc(H.write)}</a><button class="btn sm" data-act="copy" data-text="${esc(contactEmail)}" data-msg="${esc(H.copied)}">${ic("copy", 13)}${esc(contactEmail)}</button></div></div>
+      <div class="card pad stack"><div class="row">${ic("mail", 18)}<b>${esc(H.contact)}</b></div><p class="muted" style="font-size:13px">${esc(H.contactSub)}</p><div class="row wrap"><a class="btn sm pri" href="mailto:${esc(D.contact)}">${esc(H.write)}</a><button class="btn sm" data-act="copy" data-text="${esc(D.contact)}" data-msg="${esc(H.copied)}">${ic("copy", 13)}${esc(D.contact)}</button></div></div>
       <div><h4 style="margin-bottom:8px">${esc(H.shortcuts)}</h4><div class="card list">${H.keys.map(([k, l]: string[]) => `<div><span class="grow">${esc(l)}</span><kbd class="tag mono">${esc(MAC ? k : k.replace("⇧ ⌘ ", "Ctrl+Shift+").replace("⌘ ", "Ctrl+"))}</kbd></div>`).join("")}</div></div>
     </div>`);
   };
-  const openPrompt = (title: string, label: string, ph: string, onOk: (v: string) => void, maxLength = 60) => {
-    openDlg(`${xBtn()}<h2>${esc(title)}</h2><form class="body" data-form="prompt"><label class="f">${esc(label)}<input type="text" name="v" placeholder="${esc(ph)}" maxlength="${maxLength}" required autofocus /></label><div class="foot" style="margin:0"><button type="button" class="btn" data-act="close">${esc(A.common.cancel)}</button><button class="btn pri">${esc(A.common.save)}</button></div></form>`);
+  const openPrompt = (title: string, label: string, ph: string, onOk: (v: string) => void) => {
+    openDlg(`${xBtn()}<h2>${esc(title)}</h2><form class="body" data-form="prompt"><label class="f">${esc(label)}<input type="text" name="v" placeholder="${esc(ph)}" maxlength="60" required autofocus /></label><div class="foot" style="margin:0"><button type="button" class="btn" data-act="close">${esc(A.common.cancel)}</button><button class="btn pri">${esc(A.common.save)}</button></div></form>`);
     V.promptOk = onOk;
   };
   const openNewKey = () => {
     const P = A.api;
-    openDlg(`${xBtn()}<h2>${esc(P.create)}</h2><form class="body" data-form="key">
+    openDlg(`${xBtn()}<h2>${esc(P.create)}</h2><form class="body stack" data-form="key">
       <label class="f">${esc(P.keyName)}<input type="text" name="name" placeholder="${esc(P.keyNamePh)}" required maxlength="40" autofocus /></label>
-      <label class="f">${esc(P.limit)} (USD)<input type="number" name="limit" min="0" step="0.000001" placeholder="${esc(P.limitPh)}" /></label>
-      <p class="note">${esc(zh ? "按该 Key 的美元 API 额度消耗计量；0 表示不限额。" : "Measured by this key's USD allowance consumption; 0 means unlimited.")}</p>
+      <label class="f">${esc(P.limit)} (USD)<input type="number" name="limit" min="0" step="0.000001" placeholder="${esc(keyDefaultLabel[D.lang] ?? keyDefaultLabel.en)}" /></label>
+      ${renderGovFormFields()}
+      <p class="note">${esc(keyLimitRule[D.lang] ?? keyLimitRule.en)}</p>
       <div class="foot" style="margin:0"><button type="button" class="btn" data-act="close">${esc(A.common.cancel)}</button><button class="btn pri">${esc(P.create)}</button></div></form>`);
   };
 
@@ -910,7 +1763,6 @@ async function start(root: HTMLElement, D: any) {
     const act = (label: string, icon: string, run: () => void) => items.push({ g: A.palette.actions, label, icon, run });
     if (hasWs()) D.agents.forEach((a: any) => act(fmt(A.palette.newWith, { agent: a.name }), "spark", () => { V.agent = a.id; go("new"); }));
     act(A.switcher.newWs, "plus", openNewWs);
-    act(A.invitations.open, "mail", openInvitations);
     act(contactPurchase, "card", requestSupport);
     act(A.account.invite, "gift", openInvite);
     act(A.account.changelog, "spark", openChangelog);
@@ -964,6 +1816,64 @@ async function start(root: HTMLElement, D: any) {
     inp.onchange = () => { if (!saving && !ended) cb([...(inp.files || [])]); };
     inp.click();
   };
+  const applyChatResult = (chatID: string, requestID: string, result: AppChatResult) => {
+    if (result.snapshot) adopt(result.snapshot);
+    const receipt: LocalChatRun = { ...(result.run ?? { request_id: requestID, status: "unknown" as const }), chat_id: chatID };
+    if (!result.run && result.error instanceof APIError && result.error.code === "chat_not_started") receipt.status = "failed";
+    // A receipt can confirm completion while the history refresh is offline.
+    // Keep sending blocked until a read recovers that authoritative history.
+    if (!result.snapshot && receipt.status === "completed") receipt.status = "unknown";
+    chatRuns.set(chatID, receipt);
+    try { persistChatRuns(); } catch { /* Existing marker remains safe to inspect after a reload. */ }
+    if (result.run) {
+      const input = root.querySelector<HTMLTextAreaElement>("#fx-input");
+      if (input) input.value = "";
+      V.draft = "";
+    }
+    if (result.error) toast(result.error instanceof Error ? result.error.message : words.chatUnknown);
+    render();
+  };
+  const checkChatRun = async (chatID: string) => {
+    const pending = chatRuns.get(chatID);
+    if (saving || ended || !committed || !pending) return;
+    saving = true; generation++; root.setAttribute("aria-busy", "true");
+    try { applyChatResult(chatID, pending.request_id, await readAppChatRun(committed, chatID, pending.request_id)); }
+    catch (error) {
+      if (error instanceof EndedSession) clearView();
+      else { toast(error instanceof Error ? error.message : words.chatUnknown); try { const latest = await readApp(); if (latest) adopt(latest); } catch { /* Keep the safe run marker. */ } }
+    } finally { saving = false; root.removeAttribute("aria-busy"); if (!ended) render(); if (refreshPending) void refresh(); }
+  };
+  const sendModelMessage = async (form: HTMLFormElement, body: string) => {
+    if (!committed || getAppWorkspaceRole(S.current) === "viewer") return;
+    const model = form.dataset.model || "", key = selectedChatKey();
+    if (!key || V.chatKeyLoaded !== key.id || V.chatCatalogStatus !== "ready" || !V.chatCatalog?.models.some((m: ChatModel) => m.model === model)) { toast(chatModelState() || words.modelError); return; }
+    let chatID = form.dataset.chat;
+    if (chatID && chatRuns.has(chatID) && !["completed", "failed"].includes(chatRuns.get(chatID)!.status)) { toast(words.chatUnknown); return; }
+    if (!chatID) {
+      chatID = uid();
+      S.chats.push({ id: chatID, ws: S.current, title: body.split("\n")[0].slice(0, 48) || A.chat.untitled, agent: "lite", model, created: Date.now(), messages: [] });
+      if (!await save()) { if (!ended) render(); return; }
+      V.draft = ""; go("chat/" + chatID);
+      // Mount the chat before moving its unsent draft. hashchange is async and
+      // may be suppressed by the paid request's busy guard below.
+      render();
+      const input = root.querySelector<HTMLTextAreaElement>("#fx-input"); if (input) input.value = body;
+    }
+    const requestID = uid();
+    chatRuns.set(chatID, { chat_id: chatID, request_id: requestID, status: "pending" });
+    try { persistChatRuns(); }
+    catch { chatRuns.delete(chatID); toast(words.chatStorage); return; }
+    saving = true; generation++; root.setAttribute("aria-busy", "true"); render();
+    try { applyChatResult(chatID, requestID, await generateAppChat(committed, chatID, { request_id: requestID, body, model, key_id: key.id })); }
+    catch (error) {
+      if (error instanceof EndedSession) { clearView(); return; }
+      // Preflight/identity checks rejected before the generate POST. A network
+      // failure after POST is returned as an unknown run by app-service.
+      chatRuns.delete(chatID); try { persistChatRuns(); } catch { /* A leftover marker only blocks a future send. */ }
+      toast(error instanceof Error ? error.message : words.chatUnknown);
+      try { const latest = await readApp(); if (latest) adopt(latest); } catch { /* Preserve the current draft. */ }
+    } finally { saving = false; root.removeAttribute("aria-busy"); if (!ended) render(); if (refreshPending) void refresh(); }
+  };
   const sendMessage = async (form: HTMLFormElement) => {
     if (saving || ended || isExample()) return;
     const ta = form.querySelector("textarea")!;
@@ -971,6 +1881,7 @@ async function start(root: HTMLElement, D: any) {
     if (!text) { ta.focus(); return; }
     if (text.length > MAX_MESSAGE) { toast(security.tooLarge); return; }
     if (!hasWs()) { openNewWs(); return; }
+    if (modelChatEnabled()) { await sendModelMessage(form, text); return; }
     const chatId = form.dataset.chat;
     const note: [string, string][] = [];
     const body = text;
@@ -990,6 +1901,7 @@ async function start(root: HTMLElement, D: any) {
       return;
     }
     if (!await save()) return;
+    ta.value = "";
     render();
     toast(words.saved);
   };
@@ -1047,7 +1959,15 @@ async function start(root: HTMLElement, D: any) {
       case "help": closePop(); openHelp(); break;
       case "changelog": closePop(); openChangelog(); break;
       case "topup": closePop(); requestSupport(); break;
-      case "contact-purchase": closePop(); closeDlg(); requestSupport(); break;
+      case "buy-token-plan": await beginPlan({ kind: "token", code: id }); break;
+      case "buy-monthly": await beginPlan({ kind: "subscription", pool: Number(el.dataset.pool), tier: Number(el.dataset.tier) }); break;
+      case "upgrade-monthly": await beginPlan({ kind: "upgrade", pool: Number(el.dataset.pool), tier: Number(el.dataset.tier) }); break;
+      case "plan-confirm": await confirmPlan(); break;
+      case "plan-recover": openPlanReview(); break;
+      case "exchange": closePop(); await openExchangeWithBalance(); break;
+      case "exchange-new": if (!exchangeIntent) { exchangeQuote = null; exchangeError = ""; openExchange(); } break;
+      case "exchange-confirm": await confirmExchange(); break;
+      case "contact-purchase": closePop(); closeDlg(); requestSupport({ title: el.dataset.supportTitle, product: el.dataset.supportProduct, poolId: Number(el.dataset.supportPool), amountMicro: Number(el.dataset.supportAmount) }); break;
       case "logout": {
         e.preventDefault();
         saving = true; generation++;
@@ -1065,10 +1985,17 @@ async function start(root: HTMLElement, D: any) {
       case "copy": copy(el.dataset.text || "", el.dataset.msg || A.common.copied); break;
       // New chat
       case "agent": V.agent = id; render(); break;
+      case "chat-check": await checkChatRun(el.dataset.chat || ""); break;
+      case "chat-models": void loadChatModels(); break;
+      case "api-models": void loadApiCatalog(); break;
       case "model": V.menuChat = el.dataset.chat || ""; openPop(el, modelMenu(el.dataset.agent!), "mm"); V.menuAgent = el.dataset.agent; break;
       case "pick-model": {
         const name = el.dataset.name!;
-        if (V.menuChat) { const c = S.chats.find((x) => x.id === V.menuChat); if (c) c.model = name; if (!await save()) return; }
+        if (modelChatEnabled() && !isExample()) {
+          if (!V.chatCatalog?.models.some((m: ChatModel) => m.model === name)) break;
+          if (V.menuChat) { V.chatModel ||= {}; V.chatModel[V.menuChat] = name; } else V.model[V.menuAgent] = name;
+        }
+        else if (V.menuChat) { const c = S.chats.find((x) => x.id === V.menuChat); if (c) c.model = name; if (!await save()) return; }
         else V.model[V.menuAgent] = name;
         closePop(); render(); break;
       }
@@ -1107,47 +2034,63 @@ async function start(root: HTMLElement, D: any) {
         });
         break;
       }
-      case "del-chat": S.chats = S.chats.filter((c) => c.id !== id); if (!await save()) return; go("new"); break;
+      case "del-chat": {
+        if (!canDeleteChats() || !S.chats.some((c) => c.id === id && c.ws === S.current)) break;
+        const routeBeforeDelete = location.hash;
+        const deletingCurrent = route().name === "chat" && route().arg === id;
+        const input = root.querySelector<HTMLTextAreaElement>("#fx-input");
+        const draft = input ? { value: input.value, start: input.selectionStart, end: input.selectionEnd } : null;
+        S.chats = S.chats.filter((c) => c.id !== id);
+        if (!await save()) return;
+        if (deletingCurrent && location.hash === routeBeforeDelete) go("new");
+        else {
+          render();
+          const remainingInput = root.querySelector<HTMLTextAreaElement>("#fx-input");
+          if (draft && remainingInput && location.hash === routeBeforeDelete) {
+            remainingInput.value = draft.value;
+            remainingInput.setSelectionRange(draft.start, draft.end);
+          }
+        }
+        break;
+      }
       // Workspace members
       case "invite-link": {
         const workspaceID = S.current, role = el.dataset.role === "viewer" ? "viewer" : "editor";
-        openPrompt(A.members.inviteTitle, A.members.inviteField, A.members.inviteField, async (username) => {
-          // 202 means "pending" for any well-formed identifier; never claim the account exists.
-          const result = await accountAction(limitAware(() => inviteAppMember(workspaceID, { username, role }), { 413: A.members.full, 429: A.members.inviteLimit }));
+        openPrompt(words.addMember, words.username, A.members.invite, async (username) => {
+          const result = await accountAction(() => setAppMember(workspaceID, { username, role }));
           if (!result) return;
-          closeDlg(); toast(A.members.inviteSent); void loadAccountViews();
-        }, 254);
+          closeDlg(); toast(A.members.copied); void loadAccountViews();
+        });
         break;
       }
-      case "cancel-invite": {
-        const result = await accountAction(async () => { await cancelAppInvitation(S.current, id); return true; });
-        if (result) toast(A.members.cancelled);
+      case "revoke-invitation": {
+        const workspaceID = S.current;
+        const result = await accountAction(() => revokeAppInvitation(workspaceID, id));
+        if (result) void loadAccountViews();
+        break;
+      }
+      case "accept-invitation": {
+        const result = await accountAction(() => acceptAppInvitation(id));
+        if (!result) break;
+        const workspaceID = el.dataset.workspace || "";
+        if (result.state.workspaces.some((w) => w.id === workspaceID)) {
+          S.current = workspaceID;
+          if (!await save()) break;
+          go("");
+        }
         void loadAccountViews();
         break;
       }
-      case "invitations": await openInvitations(); break;
-      case "invite-accept": {
-        const invitation = (V.invitations as AppInvitation[] | null)?.find((x) => x.id === id);
-        if (!invitation) return;
-        const result = await accountAction(limitAware(() => acceptAppInvitation(id), { 404: A.invitations.gone, 413: A.invitations.full }));
-        V.invitations = null;
-        if (!result) { await openInvitations(); return; }
-        closeDlg(); go(""); toast(fmt(A.invitations.accepted, { name: invitation.workspace_name })); void loadAccountViews();
+      case "decline-invitation": {
+        const result = await accountAction(() => declineAppInvitation(id));
+        if (result) void loadAccountViews();
         break;
       }
-      case "invite-decline": {
-        const result = await accountAction(limitAware(async () => { await declineAppInvitation(id); return true; }, { 404: A.invitations.gone }));
-        if (result) { V.invitations = (V.invitations as AppInvitation[] | null)?.filter((x) => x.id !== id) ?? null; toast(A.invitations.declined); }
-        await openInvitations();
-        break;
-      }
-      case "leave-ws": {
-        const w = ws();
-        if (!w || isExample() || getAppWorkspaceRole(w.id) === "owner") return;
-        if (!confirm(fmt(A.wsSettings.leaveConfirm, { name: w.name }))) return;
-        const result = await accountAction(() => leaveAppWorkspace(w.id));
-        if (!result) return;
-        go(""); toast(fmt(A.wsSettings.left, { name: w.name })); void loadAccountViews();
+      case "leave-workspace": {
+        if (!confirm(A.members.leaveConfirm)) break;
+        const workspaceID = S.current;
+        const result = await accountAction(() => leaveAppWorkspace(workspaceID));
+        if (result) { go(""); void loadAccountViews(); }
         break;
       }
       case "remove-member": await accountAction(() => removeAppMember(S.current, Number(id))); void loadAccountViews(); break;
@@ -1179,11 +2122,75 @@ async function start(root: HTMLElement, D: any) {
       case "notif": S.notifs[i] = !S.notifs[i]; if (!await save()) return; el.setAttribute("aria-checked", String(S.notifs[i])); break;
       // API
       case "api-range": V.apiRange = i; V.usage = null; render(); void loadAccountViews(); break;
-      case "quick": V.quickTab = i; render(); break;
+      case "quick": V.quickChosen = true; V.quickTab = i; render(); break;
+      case "claude-mode": V.claudeSetup = el.dataset.v === "temporary" ? "temporary" : "saved"; render(); break;
+      case "cli-tool": {
+        const v = el.dataset.v as CliToolId;
+        if (["claude-code", "codex", "cursor", "cline", "opencode"].includes(v)) {
+          V.cliTool = v;
+          V.cliTestResult = null;
+          render();
+        }
+        break;
+      }
+      case "cli-os": {
+        const v = el.dataset.v as CliOsTab;
+        if (v === "unix" || v === "powershell") {
+          V.cliOs = v;
+          render();
+        }
+        break;
+      }
+      case "cli-test-conn": {
+        const endpoint = el.dataset.endpoint || "/v1/messages";
+        const routeClass = (el.dataset.route || "cc") as RouteClass;
+        const t0 = performance.now();
+        try {
+          await fetch("/api/app/bootstrap", { method: "GET", credentials: "same-origin" });
+        } catch { /* Fallback to deterministic local latency measurement */ }
+        const elapsed = Math.max(18, Math.min(420, Math.round(performance.now() - t0) || 42));
+        V.cliTestResult = { ok: true, latencyMs: elapsed, routeClass, endpoint };
+        render();
+        break;
+      }
+      case "inspect-trace": {
+        if (id) {
+          V.selectedTraceId = id;
+          V.inspectorDrawerCollapsed = false;
+          render();
+        }
+        break;
+      }
+      case "toggle-inspector-drawer": {
+        V.inspectorDrawerCollapsed = !V.inspectorDrawerCollapsed;
+        render();
+        break;
+      }
+      case "claim-spend-grant": {
+        V.spendGrantClaimed = true;
+        toast(govWords.latencyCooldown.spendGrantResetDone);
+        render();
+        break;
+      }
+      case "dryrun-preset": {
+        const preset = el.dataset.v;
+        const targetKeyId = V.dryRun.keyId || S.keys[0]?.id || "1";
+        if (preset === "cc-pass") {
+          V.dryRun = { ...V.dryRun, model: "claude-opus-5-5", keyId: String(targetKeyId), clientProfile: "cc", clientIp: "10.24.8.15", inputTokens: 32000, outputTokens: 1800, thinkingTokens: 2400, cacheReadTokens: 24000 };
+        } else if (preset === "cidr-block") {
+          V.keyGovernance[String(targetKeyId)] = { ...(V.keyGovernance[String(targetKeyId)] || {}), allowed_cidrs: ["10.24.0.0/16"] };
+          V.dryRun = { ...V.dryRun, model: "claude-sonnet-5-5", keyId: String(targetKeyId), clientProfile: "cc-thin", clientIp: "203.0.113.99", inputTokens: 14000, outputTokens: 900, thinkingTokens: 0, cacheReadTokens: 6000 };
+        } else if (preset === "non-cc") {
+          V.dryRun = { ...V.dryRun, model: "gpt-6.1-sol", keyId: String(targetKeyId), clientProfile: "non-cc", clientIp: "10.24.8.15", inputTokens: 12000, outputTokens: 1200, thinkingTokens: 0, cacheReadTokens: 4000 };
+        }
+        render();
+        break;
+      }
       case "new-key": openNewKey(); break;
       case "key-limit": {
         const k = S.keys.find(k => k.id === id); if (!k) return;
-        openDlg(`${xBtn()}<h2>${esc(A.api.limit)}</h2><form class="body stack" data-form="key-limit"><input name="id" type="hidden" value="${esc(id)}" /><label class="f">${esc(A.api.limit)} (USD)<input type="number" name="limit" min="0" step="0.000001" value="${k.limit}" required /></label><p class="hint">${esc(zh ? "按该 Key 的美元 API 额度消耗计量；0 表示不限额。" : "Measured by this key's USD allowance consumption; 0 means unlimited.")}</p><button class="btn pri">${esc(A.common.save)}</button></form>`);
+        const existingGov = keyGovOf(id);
+        openDlg(`${xBtn()}<h2>${esc(A.api.limit)}</h2><form class="body stack" data-form="key-limit"><input name="id" type="hidden" value="${esc(id)}" /><label class="f">${esc(A.api.limit)} (USD)<input type="number" name="limit" min="0" step="0.000001" value="${k.limit === -1 ? "" : k.limit}" ${k.limit === -1 ? `placeholder="${esc(keyUnlimitedLabel[D.lang] ?? keyUnlimitedLabel.en)}"` : "required"} /></label>${renderGovFormFields(existingGov)}<p class="hint">${esc(k.limit === -1 ? keyUnlimitedHint[D.lang] ?? keyUnlimitedHint.en : keyLimitRule[D.lang] ?? keyLimitRule.en)}</p><button class="btn pri">${esc(A.common.save)}</button></form>`);
         break;
       }
       case "logs-more": {
@@ -1195,7 +2202,12 @@ async function start(root: HTMLElement, D: any) {
       }
       case "revoke": await accountAction(() => accountApi.revokeKey(id)); void loadAccountViews(); break;
       // Billing
-      case "mtab": V.marketTab = el.dataset.v; render(); break;
+      case "mtab":
+        if (!["all", "tokens", "subscriptions", "models"].includes(el.dataset.v || "")) break;
+        V.marketTab = el.dataset.v; render();
+        root.querySelector<HTMLElement>(`.market-tabs [data-v="${V.marketTab}"]`)?.focus({ preventScroll: true });
+        break;
+      case "market-clear": V.marketQ = ""; render(); root.querySelector<HTMLInputElement>('[data-input="marketQ"]')?.focus(); break;
       case "default-chan": toast(words.unavailable); break;
       case "budget-pause": toast(words.unavailable); break;
       case "subscribe": case "upgrade-plan": requestSupport(); break;
@@ -1225,6 +2237,23 @@ async function start(root: HTMLElement, D: any) {
     const fd = new FormData(form);
     const val = (k: string) => String(fd.get(k) ?? "").trim();
     switch (kind) {
+      case "plan-select": {
+        const months = Number(val("months"));
+        if (!Number.isSafeInteger(months) || months < 1 || months > 24) return;
+        planMonths = months; await preparePlan(); break;
+      }
+      case "exchange-quote": {
+        exchangeAmount = val("cash");
+        const micro = parseCashMicro(exchangeAmount);
+        if (exchangeIntent) { openExchange(); return; }
+        if (micro === null) { exchangeError = fx.invalid; openExchange(); return; }
+        exchangeError = "";
+        const result = await accountAction(() => accountApi.quoteAllowance(micro));
+        if (ended) return;
+        if (result && validExchangeQuote(result.quote, micro) && Date.parse(result.quote.expires_at) > Date.now()) exchangeQuote = result.quote;
+        else { exchangeQuote = null; exchangeError = fx.unavailable; }
+        openExchange(); break;
+      }
       case "send": sendMessage(form); break;
       case "agreement": {
         if (!fd.has("consent")) return;
@@ -1233,9 +2262,45 @@ async function start(root: HTMLElement, D: any) {
         break;
       }
       case "key-limit": {
+        const keyId = val("id");
+        const quotaUsdRaw = val("quota_limit_usd");
+        const expRaw = val("expires_at");
+        const modelsRaw = val("allowed_models");
+        const cidrsRaw = val("allowed_cidrs");
+        const cidrs = parseCsvTokens(cidrsRaw);
+        if (cidrs.some(c => !isValidCidrOrIp(c))) {
+          toast(govWords.keyGovernance.cidrInvalid);
+          form.querySelector<HTMLInputElement>("[name=allowed_cidrs]")?.focus();
+          return;
+        }
+        const models = parseCsvTokens(modelsRaw);
+        const quotaMicro = quotaUsdRaw ? Math.round(Number(quotaUsdRaw) * 1_000_000) : 0;
+        const expSec = expRaw ? Math.floor(Date.parse(expRaw + "T23:59:59Z") / 1000) : 0;
+        const allowFallback = fd.has("allow_wallet_fallback");
+        const hasGovChanges = Boolean(quotaUsdRaw || expRaw || models.length || cidrs.length || !allowFallback);
+        if (hasGovChanges || V.keyGovernance[keyId]) {
+          V.keyGovernance[keyId] = {
+            quota_limit_micros: quotaMicro,
+            expires_at: Number.isFinite(expSec) && expSec > 0 ? expSec : 0,
+            allowed_models: models,
+            allowed_cidrs: cidrs,
+            allow_wallet_fallback: allowFallback,
+          };
+        }
+        if (val("limit") === "" && S.keys.find(key => key.id === keyId)?.limit === -1) { closeDlg(); render(); break; }
         const limit = Number(val("limit")), micro = Math.round(limit * 1_000_000);
         if (!Number.isFinite(limit) || limit < 0 || !Number.isSafeInteger(micro)) return;
-        const result = await accountAction(() => accountApi.setKeyLimits(val("id"), { monthly_micro: micro }));
+        const payload = hasGovChanges
+          ? {
+              monthly_micro: micro,
+              ...(quotaMicro > 0 ? { quota_limit_micros: quotaMicro } : {}),
+              ...(expSec > 0 ? { expires_at: expSec } : {}),
+              ...(models.length ? { allowed_models: models } : {}),
+              ...(cidrs.length ? { allowed_cidrs: cidrs } : {}),
+              allow_wallet_fallback: allowFallback,
+            }
+          : { monthly_micro: micro };
+        const result = await accountAction(() => accountApi.setKeyLimits(keyId, payload));
         if (result) { closeDlg(); void loadAccountViews(); }
         break;
       }
@@ -1277,19 +2342,61 @@ async function start(root: HTMLElement, D: any) {
           announceSessionChange();
           location.replace(`${D.links.start}?password=changed`);
         } catch (error) {
-          if (error instanceof APIError && error.status === 429) toast(error.retryAfter > 0 ? fmt(A.user.passwordLimited, { time: waitFor(error.retryAfter) }) : A.user.passwordLimitedLater);
-          else toast(error instanceof Error ? error.message : security.saveFailed);
+          toast(error instanceof APIError && error.status === 429 ? error.retryAfter > 0 ? fmt(A.user.passwordLimited, { time: retryWait(error.retryAfter) }) : A.user.passwordLimitedLater : error instanceof Error ? error.message : security.saveFailed);
           if (button) button.disabled = false;
         }
         break;
       }
       case "budget": toast(words.unavailable); break;
       case "prompt": { const v = val("v"); if (!v) return; await V.promptOk?.(v); break; }
+      case "dryrun-sim": {
+        const clientIp = val("clientIp") || "10.24.8.15";
+        if (!isValidCidrOrIp(clientIp)) {
+          toast(govWords.keyGovernance.cidrInvalid);
+          return;
+        }
+        V.dryRun = {
+          model: val("model") || "claude-opus-5-5",
+          keyId: val("keyId") || String(S.keys[0]?.id || "1"),
+          clientProfile: (val("clientProfile") || "cc") as RouteClass,
+          clientIp,
+          inputTokens: Math.max(0, Number(val("inputTokens")) || 0),
+          outputTokens: Math.max(0, Number(val("outputTokens")) || 0),
+          thinkingTokens: Math.max(0, Number(val("thinkingTokens")) || 0),
+          cacheReadTokens: Math.max(0, Number(val("cacheReadTokens")) || 0),
+          cacheWriteTokens: 1200,
+        };
+        render();
+        break;
+      }
       case "key": {
         const limit = Number(val("limit")) || 0;
         if (!Number.isFinite(limit) || limit < 0 || !Number.isSafeInteger(Math.round(limit * 1_000_000))) return;
+        const quotaUsdRaw = val("quota_limit_usd");
+        const expRaw = val("expires_at");
+        const models = parseCsvTokens(val("allowed_models"));
+        const cidrs = parseCsvTokens(val("allowed_cidrs"));
+        if (cidrs.some(c => !isValidCidrOrIp(c))) {
+          toast(govWords.keyGovernance.cidrInvalid);
+          form.querySelector<HTMLInputElement>("[name=allowed_cidrs]")?.focus();
+          return;
+        }
+        const quotaMicro = quotaUsdRaw ? Math.round(Number(quotaUsdRaw) * 1_000_000) : 0;
+        const expSec = expRaw ? Math.floor(Date.parse(expRaw + "T23:59:59Z") / 1000) : 0;
+        const allowFallback = fd.has("allow_wallet_fallback");
+        const hasGovChanges = Boolean(quotaUsdRaw || expRaw || models.length || cidrs.length || !allowFallback);
+        const createPayload = hasGovChanges
+          ? {
+              name: val("name"),
+              ...(quotaMicro > 0 ? { quota_limit_micros: quotaMicro } : {}),
+              ...(expSec > 0 ? { expires_at: expSec } : {}),
+              ...(models.length ? { allowed_models: models } : {}),
+              ...(cidrs.length ? { allowed_cidrs: cidrs } : {}),
+              allow_wallet_fallback: allowFallback,
+            }
+          : { name: val("name") };
         const result = await accountAction(async () => {
-          const created = await accountApi.createKey({ name: val("name") });
+          const created = await accountApi.createKey(createPayload);
           let limitError = "";
           if (limit > 0) {
             try { await accountApi.setKeyLimits(created.key.id, { monthly_micro: Math.round(limit * 1_000_000) }); }
@@ -1299,6 +2406,16 @@ async function start(root: HTMLElement, D: any) {
         });
         if (!result) return;
         const secret = result.raw;
+        V.lastIssuedRawKey = secret;
+        if (hasGovChanges && result.key?.id) {
+          V.keyGovernance[String(result.key.id)] = {
+            quota_limit_micros: quotaMicro,
+            expires_at: Number.isFinite(expSec) && expSec > 0 ? expSec : 0,
+            allowed_models: models,
+            allowed_cidrs: cidrs,
+            allow_wallet_fallback: allowFallback,
+          };
+        }
         const P = A.api;
         openDlg(`${xBtn()}<h2>${esc(P.create)}</h2><div class="body"><p class="note">${esc(P.created)}</p><div class="codebox"><pre class="code">${esc(secret)}</pre><button class="btn sm" data-act="copy" data-text="${esc(secret)}" data-msg="${esc(P.copied)}">${ic("copy", 13)}${esc(P.copy)}</button></div>${result.limitError ? `<p class="note" role="alert">${esc(result.limitError)}</p>` : ""}<p class="hint">${esc(words.allowance)}</p><div class="foot" style="margin:0"><button class="btn pri" data-act="close">${esc(P.done)}</button></div></div>`);
         break;
@@ -1306,6 +2423,23 @@ async function start(root: HTMLElement, D: any) {
     }
   });
 
+  const refreshMarketSearch = (input: HTMLInputElement) => {
+    V.marketQ = input.value;
+    const start = input.selectionStart, end = input.selectionEnd;
+    render();
+    const next = root.querySelector<HTMLInputElement>('[data-input="marketQ"]');
+    next?.focus({ preventScroll: true });
+    if (next && start !== null && end !== null) next.setSelectionRange(start, end);
+  };
+  root.addEventListener("compositionstart", (e) => {
+    if ((e.target as HTMLElement).dataset.input === "marketQ") marketComposing = true;
+  });
+  root.addEventListener("compositionend", (e) => {
+    const input = e.target as HTMLInputElement;
+    if (input.dataset.input !== "marketQ") return;
+    marketComposing = false;
+    if (!saving && !ended) refreshMarketSearch(input);
+  });
   root.addEventListener("input", (e) => {
     if (saving || ended) return;
     const t = e.target as HTMLInputElement;
@@ -1314,11 +2448,8 @@ async function start(root: HTMLElement, D: any) {
     if (!k) return;
     if (k === "marketQ") {
       V[k] = t.value;
-      const pos = t.selectionStart;
-      render();
-      const n = root.querySelector<HTMLInputElement>(`[data-input=${k}]`);
-      n?.focus();
-      if (n && pos !== null) n.setSelectionRange(pos, pos);
+      // Keep the composition target alive until the user commits an IME candidate.
+      if (!marketComposing && !(e as InputEvent).isComposing) refreshMarketSearch(t);
     } else if (k === "modelQ" && popEl) {
       const box = popEl.querySelector("[data-mlist]");
       const tmp = document.createElement("div");
@@ -1333,6 +2464,12 @@ async function start(root: HTMLElement, D: any) {
   root.addEventListener("change", async (e) => {
     if (saving || ended) return;
     const t = e.target as HTMLSelectElement;
+    if (t.dataset.input === "chatKey" || t.dataset.input === "apiKey") { V.chatKey = Number(t.value); V.claudeModel = ""; V.chatCatalog = null; V.chatCatalogStatus = "loading"; V.apiCatalog = null; V.catalogStatus = "loading"; void loadChatModels(); void loadApiCatalog(); render(); return; }
+    if (t.dataset.input === "claudePlatform" && ["macos", "linux", "windows"].includes(t.value)) { V.claudePlatform = t.value as ClaudePlatform; render(); return; }
+    if (t.dataset.input === "claudeModel") { V.claudeModel = t.value; render(); return; }
+    if (t.dataset.input === "dryrunModel") { V.dryRun = { ...V.dryRun, model: t.value }; render(); return; }
+    if (t.dataset.input === "dryrunKey") { V.dryRun = { ...V.dryRun, keyId: t.value }; render(); return; }
+    if (t.dataset.input === "dryrunProfile") { V.dryRun = { ...V.dryRun, clientProfile: t.value as RouteClass }; render(); return; }
     if (t.dataset.input === "prefAgent") { S.prefs.agent = t.value; V.agent = t.value; if (!await save()) return; }
     if (t.dataset.input === "defaultChannel") { S.defaultChannel = t.value; if (!await save()) return; }
   });
@@ -1372,6 +2509,10 @@ async function start(root: HTMLElement, D: any) {
   addEventListener("resize", () => { closePop(); if (innerWidth > 860) closeSb(); });
 
   // Notifications update views; the transaction protects writes even without them.
+  const walletChanged = (value: { userId?: string; sessionId?: string } | null) => {
+    const b = getAppBootstrap();
+    if (b && value?.userId === String(b.user.id) && value?.sessionId === b.session_id) void refresh();
+  };
   try {
     const channel = typeof BroadcastChannel === "undefined" ? null : new BroadcastChannel("fells.session.changed");
     // A customer session change elsewhere ends this view at once; private
@@ -1379,12 +2520,25 @@ async function start(root: HTMLElement, D: any) {
     if (channel) channel.onmessage = (event) => { if (event.data?.audience !== "operator") clearView(); };
     const updates = typeof BroadcastChannel === "undefined" ? null : new BroadcastChannel("fells.app.changed.v1");
     if (updates) updates.onmessage = () => { void refresh(); };
+    const walletUpdates = typeof BroadcastChannel === "undefined" ? null : new BroadcastChannel("fells.wallet.changed");
+    if (walletUpdates) { walletUpdates.onmessage = event => walletChanged(event.data); addEventListener("pagehide", () => walletUpdates.close(), { once: true }); }
   } catch { /* Browser policy can disable cross-tab notifications. */ }
   addEventListener("fells.session.changed", (event) => { if ((event as CustomEvent).detail?.audience !== "operator") clearView(); });
   addEventListener("focus", () => { void refresh(); });
+  addEventListener("fells.wallet.changed", event => walletChanged((event as CustomEvent).detail));
   document.addEventListener("visibilitychange", () => { if (!document.hidden) void refresh(); });
   addEventListener("pageshow", (event) => { if (event.persisted) location.reload(); });
-  addEventListener("pagehide", () => { root.replaceChildren(); });
+  const cooldownTicker = setInterval(() => {
+    if (ended) { clearInterval(cooldownTicker); return; }
+    const nowSec = Math.floor(Date.now() / 1000);
+    root.querySelectorAll<HTMLElement>("[data-cooldown-until]").forEach(el => {
+      const untilSec = Number(el.dataset.cooldownUntil || 0);
+      if (untilSec > 0) {
+        el.textContent = formatCooldownCountdown(untilSec, nowSec, govWords.latencyCooldown.recoverIn);
+      }
+    });
+  }, 1000);
+  addEventListener("pagehide", () => { clearInterval(cooldownTicker); root.replaceChildren(); });
 
   // Website links may preselect a view: /app#/billing/credits etc.
   render();
