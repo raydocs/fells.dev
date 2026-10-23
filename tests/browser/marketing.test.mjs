@@ -53,6 +53,30 @@ test('market and PAYG filters update visible content and keyboard tab selection'
   assert.deepEqual(errors, []);
 });
 
+test('all six marketing locales show backend-matching debit rates, whole-request long tier, 30-day plans and paused referral status', async t => {
+  const { page, base, errors } = await fixture.setup(t);
+  const paused = [/paused/i, /暂未开放/, /暫未開放/, /休止中/, /중단/, /pausadas/];
+  const wholeRequest = [/entire request/, /整笔/, /整筆/, /リクエスト全体/, /요청 전체/, /toda la solicitud/];
+  for (const [i, [prefix]] of locales.entries()) {
+    await page.goto(base + prefix + '/market/');
+    const rates = await page.locator('.mcard').evaluateAll(cards => Object.fromEntries(cards.map(card => [card.querySelector('h3')?.textContent.trim(), [...card.querySelectorAll('dd b')].map(node => node.textContent.trim())])));
+    assert.deepEqual(rates['Claude Opus 5.5'], ['$4.00', '$20.00']);
+    assert.deepEqual(rates['Claude Sonnet 5.5'], ['$2.00', '$10.00']);
+    assert.deepEqual(rates['Claude Haiku 5.5'], ['$0.10', '$0.50', '$0.50', '$2.50']);
+    assert.match(await page.locator('.mcard:has(h3:text("Claude Haiku 5.5")) .over').textContent(), wholeRequest[i]);
+    assert.match(await page.locator('[data-group=sub]').innerText(), /¥1,?288/);
+    assert.match(await page.locator('#plans').innerText(), /30/);
+    await page.goto(base + prefix + '/');
+    const referral = await page.locator('#referral').innerText();
+    assert.match(referral, paused[i]);
+    assert.match(referral, /Token Plan/);
+    assert.doesNotMatch(referral, /¥\s*(?:99|100)|365/);
+    await page.goto(base + prefix + '/developer-api/');
+    assert.match(await page.locator('main').innerText(), /Token Plan/);
+  }
+  assert.deepEqual(errors, []);
+});
+
 test('developer installation/configuration tabs, clipboard and blog categories execute their actions', async t => {
   const { page, base, errors } = await fixture.setup(t);
   await page.addInitScript(() => { window.copied = []; navigator.clipboard.writeText = async value => window.copied.push(value); });
@@ -71,7 +95,7 @@ test('developer installation/configuration tabs, clipboard and blog categories e
     assert.equal(await page.evaluate(() => window.copied.at(-1)), text);
   }
   const setup = page.locator('[data-setup]');
-  await setup.locator('summary').click();
+  await setup.locator(':scope > summary').click();
   await page.waitForFunction(() => document.querySelector('[data-setup-label]').textContent === document.querySelector('[data-setup]').dataset.show);
   await page.goto(base + '/blog/');
   await page.locator('[data-cat=models]').click();
@@ -82,7 +106,7 @@ test('developer installation/configuration tabs, clipboard and blog categories e
   assert.deepEqual(errors, []);
 });
 
-test('all localized marketing routes expose matching language, canonical and hreflang metadata', async t => {
+test('all localized marketing routes expose matching locale metadata while checkout stays unindexed', async t => {
   const { context, page, base, errors } = await fixture.setup(t);
   await page.goto(base + '/');
   const slugs = ['', 'market', 'developer-api', 'security', 'faq', 'blog', 'checkout'];
@@ -93,21 +117,27 @@ test('all localized marketing routes expose matching language, canonical and hre
       assert.equal(response.status(), 200, path);
       const result = await page.evaluate(html => {
         const document = new DOMParser().parseFromString(html, 'text/html');
-        return { lang: document.documentElement.lang, canonical: document.querySelector('[rel=canonical]')?.getAttribute('href'), og: document.querySelector('[property="og:url"]')?.getAttribute('content'), alternates: Array.from(document.querySelectorAll('[rel=alternate][hreflang]')).map(element => [element.getAttribute('hreflang'), element.getAttribute('href')]), title: document.title, description: document.querySelector('[name=description]')?.getAttribute('content') };
+        return { lang: document.documentElement.lang, robots: document.querySelector('[name=robots]')?.getAttribute('content'), canonical: document.querySelector('[rel=canonical]')?.getAttribute('href'), og: document.querySelector('[property="og:url"]')?.getAttribute('content'), alternates: Array.from(document.querySelectorAll('[rel=alternate][hreflang]')).map(element => [element.getAttribute('hreflang'), element.getAttribute('href')]), title: document.title, description: document.querySelector('[name=description]')?.getAttribute('content') };
       }, await response.text());
       assert.equal(result.lang, lang, path);
-      assert.equal(new URL(result.canonical).pathname.replace(/\/$/, ''), path.replace(/\/$/, ''), path);
-      assert.equal(result.og, result.canonical, path);
-      assert.equal(result.alternates.length, 7, path);
-      for (const [alternatePrefix, , code] of locales) {
-        const alternate = result.alternates.find(([locale]) => locale === code);
-        assert.equal(new URL(alternate[1]).pathname.replace(/\/$/, ''), (alternatePrefix + '/' + slug).replace(/\/$/, ''), path + ': ' + code);
+      if (slug === 'checkout') {
+        assert.match(result.robots, /noindex/, path);
+        assert.equal(result.canonical, undefined, path);
+        assert.equal(result.alternates.length, 0, path);
+      } else {
+        assert.equal(new URL(result.canonical).pathname.replace(/\/$/, ''), path.replace(/\/$/, ''), path);
+        assert.equal(result.og, result.canonical, path);
+        assert.equal(result.alternates.length, 7, path);
+        for (const [alternatePrefix, , code] of locales) {
+          const alternate = result.alternates.find(([locale]) => locale === code);
+          assert.equal(new URL(alternate[1]).pathname.replace(/\/$/, ''), (alternatePrefix + '/' + slug).replace(/\/$/, ''), path + ': ' + code);
+        }
       }
       assert.doesNotMatch(result.title + result.description, /\{(?:pct|zhe|trial|tp|gp|off|fx)\}/, path);
     }
     await page.goto(base + prefix + '/');
     assert.ok(await page.locator('#plans article.tier').count() >= 4);
-    assert.equal(await page.locator('#plans article.tier:not(:has([data-open-customer-support]))').count(), 0, 'every plan card routes purchase to support');
+    assert.equal(await page.locator('#plans article.tier:not(:has([data-purchase-market]))').count(), 0, 'every plan card enters the customer marketplace');
     assert.equal(await page.locator('#plans a[href*="/checkout"]').count(), 0);
     assert.doesNotMatch(await page.locator('#plans').innerText(), /\{(?:pct|zhe|off|trial|trialQuota|tp|gp|fx|days)\}/);
   }

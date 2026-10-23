@@ -5,13 +5,13 @@ export interface SessionDto {
   id?: number; username: string; display_name: string; created_at: number;
   self_keys: boolean; agreement: { version: string; accepted: boolean; accepted_at?: number };
 }
-export interface AllowanceDto { user_id: number; micro: number; expires_at: number; comp_micro?: number; comp_expires_at?: number }
+export interface AllowanceDto { user_id: number; micro: number; expires_at: number; comp_micro?: number; comp_expires_at?: number; plan_micro?: number }
 export interface BootstrapDto {
   schema_version: number;
   session_id: string;
-  user: { id: number; username: string; email: string; name: string; joined_at: number; self_keys: boolean };
+  user: { id: number; username: string; email: string; name: string; joined_at: number; self_keys: boolean; self_keys_exchange_blocked?: boolean };
   wallet: { currency: "CNY"; cash_micro: number; grant_micro: number; grant_expires_at: number };
-  api_allowance: { currency: "USD"; balance: AllowanceDto; term_months: number; price_cny: number };
+  api_allowance: { currency: "USD"; balance: AllowanceDto; term_months: number; price_cny?: number };
   agreement: SessionDto["agreement"]; capabilities: Record<string, boolean>;
 }
 export interface AuthConfigDto { signup_enabled: boolean; email_enabled?: boolean; github_enabled?: boolean; channels: string[]; turnstile_site_key: string; min_password_length: number; gift?: { amount_micro: number; expires_days: number } }
@@ -33,9 +33,30 @@ export interface SubscriptionsDto {
   rides?: Record<string, unknown>[]; preferred_ride_mode?: "monthly" | "allowance" | string;
   [key: string]: unknown;
 }
+interface TokenPlanSubscriptionDto {
+  id: number; user_id: number; plan_id: number; plan_code: string;
+  price_micro: number; quota_usd_micro: number; burst_usd_micro: number;
+  period_start: number; period_end: number; used_usd_micro: number;
+  status: "active" | "queued" | "expired"; ref: string; created_at: number;
+}
+interface TokenPlanCurrentDto extends TokenPlanSubscriptionDto {
+  name: string; remaining_guaranteed_usd_micro: number;
+  remaining_burst_usd_micro: number; burst_allowed: boolean;
+  queued?: TokenPlanSubscriptionDto;
+}
+export interface TokenPlansDto {
+  plans: { code: string; name: string; price_micro: number; quota_usd_micro: number;
+    burst_usd_micro: number; period: "once" | "month"; period_days: number;
+    new_user_only: boolean; enabled: boolean; terms_hash: string }[];
+  current: TokenPlanCurrentDto | null;
+  burst_allowed: boolean;
+  api_keys_will_enable?: boolean;
+}
 export interface IssuedKeyDto {
   id: number; name: string; prefix: string; created_at: number; expires_at: number; revoked: boolean;
-  daily_allow_micro: number; monthly_allow_micro: number; rpm: number; [key: string]: unknown;
+  daily_allow_micro: number; monthly_allow_micro: number; monthly_allow_limit_micro?: number; rpm: number;
+  quota_limit_micros?: number | null; used_micros?: number; allowed_models?: string[] | null; allowed_cidrs?: string[] | null; allow_wallet_fallback?: boolean;
+  [key: string]: unknown;
 }
 export interface KeysDto { keys: IssuedKeyDto[]; self_keys: boolean; limit_defaults: { daily_micro: number; monthly_micro: number; rpm: number } }
 export interface TopupDto {
@@ -44,23 +65,15 @@ export interface TopupDto {
   coupon_id: number; bonus_micro: number; pay_method: string; [key: string]: unknown;
 }
 export interface TopupInput { amount_micro: number; draft: boolean; id?: number; note?: string; coupon_id?: number; pay_method?: string; need_invoice?: boolean; invoice_title?: string; invoice_tax_no?: string; invoice_email?: string }
-/** GET /api/app/plans: CNY Token Plan prices as the server offers them. */
-interface TokenPlanDto {
-  code: string; name: string; price_micro: number; quota_usd_micro: number; burst_usd_micro: number;
-  period: string; period_days: number; new_user_only: boolean; enabled: boolean;
-}
-export interface TokenPlansDto { plans: TokenPlanDto[]; current: unknown; burst_allowed: boolean }
-/** The displayed CNY price is the most the customer agreed to pay (409 price_changed otherwise). */
-export interface TokenPlanBuyInput { plan: string; max_charge_micro: number; ref?: string }
-export interface KeyLimitsInput { daily_micro?: number; monthly_micro?: number; rpm?: number }
+export interface KeyLimitsInput { daily_micro?: number; monthly_micro?: number; rpm?: number; quota_limit_micros?: number | null; expires_at?: number | null; allowed_models?: string[]; allowed_cidrs?: string[]; allow_wallet_fallback?: boolean }
 export interface SignupInput { username?: string; dest: string; code: string; password: string; display_name?: string; locale?: string; referral_code?: string; agreement_version: string }
 export type Query = Record<string, string | number | boolean | undefined>;
 
-/** Mirrors store.PromptTokens: OpenAI/Gemini input already includes cache. */
+/** Mirrors store.PromptTokens: OpenAI/Gemini input includes cache reads; writes are separate. */
 export function usageTokens(row: Record<string, unknown>): number {
   const input = Number(row.tokens_in ?? 0), output = Number(row.tokens_out ?? 0);
   const includesCache = row.protocol === "openai" || row.protocol === "gemini";
-  return input + output + (includesCache ? 0 : Number(row.tokens_cache_r ?? 0) + Number(row.tokens_cache_w ?? 0));
+  return input + output + Number(row.tokens_cache_w ?? 0) + (includesCache ? 0 : Number(row.tokens_cache_r ?? 0));
 }
 
 let expectedIdentity: { userId: number; sessionId: string } | null = null;
@@ -101,7 +114,8 @@ export const accountApi = {
   login: (username: string, password: string, turnstile_token = "", signal?: AbortSignal) => request<{ ok: true; username: string; display_name: string }>("session", { body: { username, password, turnstile_token }, signal }, true),
   logout: (signal?: AbortSignal) => request<{ ok: true }>("session", { method: "DELETE", signal }),
   authConfig: (signal?: AbortSignal) => request<AuthConfigDto>("auth/config", { signal }, true),
-  sendCode: (dest: string, purpose: "signup" | "reset", turnstile_token = "", signal?: AbortSignal) => request<{ ok: true; resend_after: number }>("auth/code", { body: { channel: "email", dest, purpose, turnstile_token }, signal }, true),
+  verifyHuman: (dest: string, purpose: "signup" | "reset", turnstile_token: string, signal?: AbortSignal) => request<{ ok: true; expires_in: number }>("auth/human", { body: { channel: "email", dest, purpose, turnstile_token }, signal }, true),
+  sendCode: (dest: string, purpose: "signup" | "reset", turnstile_token = "", signal?: AbortSignal) => request<{ ok: true; resend_after?: number; expires_in?: number }>("auth/code", { body: { channel: "email", dest, purpose, turnstile_token }, signal }, true),
   signup: (body: SignupInput, signal?: AbortSignal) => request<{ ok: true; username: string; gift_micro: number; referred: boolean }>("auth/signup", { body: { ...body, channel: "email" }, signal }, true),
   reset: (dest: string, code: string, password: string, signal?: AbortSignal) => request<{ ok: true }>("auth/reset", { body: { dest, code, password }, signal }, true),
   password: (current_password: string, new_password: string, signal?: AbortSignal) => post<{ ok: true }>("password", { current_password, new_password }, signal),
@@ -112,7 +126,7 @@ export const accountApi = {
   preferences: (signal?: AbortSignal) => get<Record<string, unknown>>("preferences", signal),
   updatePreferences: (body: Record<string, unknown>, signal?: AbortSignal) => post<Record<string, unknown>>("preferences", body, signal),
   keys: (signal?: AbortSignal) => get<KeysDto>("keys", signal),
-  createKey: (body: { name: string; ttl_days?: number; project_id?: number }, signal?: AbortSignal) => post<{ raw: string; key: IssuedKeyDto }>("keys", body, signal),
+  createKey: (body: { name: string; ttl_days?: number; project_id?: number; quota_limit_micros?: number | null; expires_at?: number | null; allowed_models?: string[]; allowed_cidrs?: string[]; allow_wallet_fallback?: boolean }, signal?: AbortSignal) => post<{ raw: string; key: IssuedKeyDto }>("keys", body, signal),
   revokeKey: (id: number | string, signal?: AbortSignal) => post<{ ok: true }>(`keys/${idPath(id)}/revoke`, {}, signal),
   deleteKey: (id: number | string, signal?: AbortSignal) => request<{ ok: true }>(`keys/${idPath(id)}`, { method: "DELETE", signal }),
   keyLimits: (id: number | string, signal?: AbortSignal) => get<Record<string, unknown>>(`keys/${idPath(id)}/limits`, signal),
@@ -122,14 +136,18 @@ export const accountApi = {
   usageValue: (q?: Query, signal?: AbortSignal) => get<Record<string, unknown>>(`usage/value${query(q)}`, signal),
   logs: (q?: Query, signal?: AbortSignal) => get<Record<string, unknown>>(`logs${query(q)}`, signal),
   models: (signal?: AbortSignal) => get<Record<string, unknown>>("models", signal),
-  catalog: (signal?: AbortSignal) => get<Record<string, unknown>>("catalog", signal),
+  catalog: (key_id?: number, signal?: AbortSignal) => get<Record<string, unknown>>(`catalog${query({ key_id })}`, signal),
+  chatModels: (key_id: number, signal?: AbortSignal) => get<unknown>(`chat-models${query({ key_id })}`, signal),
   model: (model: string, signal?: AbortSignal) => get<Record<string, unknown>>(`catalog/model/${encodeURIComponent(model)}`, signal),
   wallet: (signal?: AbortSignal) => get<WalletDto>("wallet", signal),
   walletLedger: (page = 1, signal?: AbortSignal) => get<Record<string, unknown>>(`wallet/ledger${query({ page })}`, signal),
   allowance: (signal?: AbortSignal) => get<AllowanceResponse>("allowance", signal),
   allowanceLedger: (page = 1, signal?: AbortSignal) => get<Record<string, unknown>>(`allowance/ledger${query({ page })}`, signal),
-  buyAllowance: (cash_micro: number, min_usd_micro: number, key: string, signal?: AbortSignal) => moneyPost<{ allowance: AllowanceDto; car: unknown }>("allowance/buy", { cash_micro, min_usd_micro }, key, signal),
+  quoteAllowance: (cash_micro: number, signal?: AbortSignal) => post<{ quote: import("./currency-flow").ExchangeQuote }>("allowance/quote", { cash_micro }, signal),
+  buyAllowance: (cash_micro: number, quote_id: string, key: string, signal?: AbortSignal) => moneyPost<{ allowance: AllowanceDto; car: unknown; exchange: import("./currency-flow").ExchangeQuote }>("allowance/buy", { cash_micro, quote_id }, key, signal),
   subscriptions: (signal?: AbortSignal) => get<SubscriptionsDto>("subscriptions", signal),
+  tokenPlans: (signal?: AbortSignal) => get<TokenPlansDto>("plans", signal),
+  buyTokenPlan: (body: { plan: string; max_charge_micro: number; terms_hash: string }, key: string, signal?: AbortSignal) => moneyPost<Record<string, unknown>>("plans/buy", body, key, signal),
   setCurrentSubscription: (pool_id: number, signal?: AbortSignal) => post<{ ok: true; ride_pool_id: number }>("subscriptions/current", { pool_id }, signal),
   setRideMode: (mode: "monthly" | "allowance", signal?: AbortSignal) => post<{ ok: true; preferred_ride_mode: string; car?: string }>("subscriptions/ride-mode", { mode }, signal),
   buySubscription: (body: { pool_id: number; tier: number; months: number; max_charge_micro: number; coupon_id?: number }, key: string, signal?: AbortSignal) => moneyPost<Record<string, unknown>>("subscriptions/buy", body, key, signal),
@@ -145,19 +163,6 @@ export const accountApi = {
   referral: (signal?: AbortSignal) => get<Record<string, unknown>>("referral", signal),
   rebates: (signal?: AbortSignal) => get<Record<string, unknown>>("rebates", signal),
   invoices: (signal?: AbortSignal) => get<{ files: { id: number; topup_id: number; filename: string; size_bytes: number; uploaded_at: number }[] }>("invoices", signal),
-  tokenPlans: (signal?: AbortSignal) => get<TokenPlansDto>("plans", signal),
-  /**
-   * Requires the price shown to the customer. A plan repriced in between is
-   * refused with APIError(409, code "price_changed") whose details carry
-   * current_price_micro; ask again before retrying with a new key.
-   */
-  buyTokenPlan: (body: TokenPlanBuyInput, key: string, signal?: AbortSignal) => {
-    if (typeof body.plan !== "string" || !body.plan.trim()) throw new Error("Choose a Token Plan");
-    if (!Number.isSafeInteger(body.max_charge_micro) || body.max_charge_micro < 0) throw new Error("Confirm the maximum CNY charge");
-    const payload: TokenPlanBuyInput = { plan: body.plan, max_charge_micro: body.max_charge_micro };
-    if (body.ref !== undefined) payload.ref = body.ref;
-    return moneyPost<{ subscription: Record<string, unknown>; queued: boolean; replayed?: boolean }>("plans/buy", payload, key, signal);
-  },
   creditRebate: (body: Record<string, number | string>, key: string, signal?: AbortSignal) => moneyPost<Record<string, unknown>>("rebates/credit", body, key, signal),
 };
 
