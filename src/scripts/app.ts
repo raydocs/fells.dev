@@ -1369,7 +1369,24 @@ async function start(root: HTMLElement, D: any) {
     const rides = V.subscriptions?.rides ?? [];
     const rideMode = V.subscriptions?.preferred_ride_mode;
     const rideModeControl = V.subscriptions ? `<div class="row wrap" style="margin:0 0 12px"><span class="muted">${esc(zh ? "使用方式" : "Usage mode")}</span><button class="btn sm ${rideMode === "monthly" ? "pri" : "soft"}" data-act="set-ride-mode" data-mode="monthly" ${rideMode === "monthly" ? "aria-pressed=true" : "aria-pressed=false"}>${esc(words.monthlyRideMode)}</button><button class="btn sm ${rideMode === "allowance" ? "pri" : "soft"}" data-act="set-ride-mode" data-mode="allowance" ${rideMode === "allowance" ? "aria-pressed=true" : "aria-pressed=false"}>${esc(words.allowanceRideMode)}</button></div>` : "";
-    const mySubscriptions = `<section><div class="sec-title"><h3>${esc(words.mySubscriptions)}</h3></div><p class="note">${esc(words.manualBillingMode)}</p>${rideModeControl}<div class="card list">${rides.map((ride: any) => `<div><span class="grow"><b>${esc(ride.pool_name)} · ${esc(ride.tier)} ${esc(zh ? "人档" : "seats")}${ride.current ? ` · ${esc(words.currentRide)}` : ""}</b><small>${esc(words.expires)} ${esc(dfmt(Number(ride.expires_at) * 1000))}${ride.seated ? "" : ` · ${esc(zh ? "尚未分配座位" : "Seat not assigned yet")}`}</small></span>${!ride.current && Number.isSafeInteger(Number(ride.pool_id)) && Number(ride.pool_id) > 0 ? `<button class="btn sm" data-act="set-current-ride" data-id="${esc(ride.pool_id)}">${esc(words.makeCurrentRide)}</button>` : ""}</div>`).join("") || `<div class="muted">${esc(V.subscriptions ? words.notOffered : words.loading)}</div>`}</div></section>`;
+    // Reading details must never switch the active subscription.
+    const rideDetails = (ride: any): string => {
+      const overview = ride.overview;
+      if (!overview || typeof overview !== "object") return "";
+      const labels: Record<string, string> = zh
+        ? { ready: "可用", tight: "接近限额", full: "已用满", scoped_full: "部分模型限额已用满", pending: "等待分配", unknown: "暂无读数" }
+        : { ready: "Available", tight: "Near limit", full: "Limit reached", scoped_full: "Model limit reached", pending: "Awaiting assignment", unknown: "No reading" };
+      const windows = Array.isArray(overview.windows) ? overview.windows : [];
+      const items = windows.map((w: any) => {
+        const value = w.used_pct;
+        const pct = typeof value === "number" && Number.isFinite(value) ? `${Math.max(0, Math.min(100, value)).toFixed(1)}%` : "—";
+        const name = w.scope || (Number(w.window_minutes) === 300 ? (zh ? "5 小时" : "5 hours") : Number(w.window_minutes) === 10080 ? (zh ? "每周" : "Weekly") : w.kind || (zh ? "额度" : "Limit"));
+        const reset = w.reset ? ` · ${zh ? "上一窗口已重置" : "Previous window reset"}` : Number(w.reset_at) > 0 ? ` · ${zh ? "重置" : "Resets"} ${tfmt(Number(w.reset_at) * 1000)}` : "";
+        return `<li>${esc(name)}: ${esc(pct)}${esc(reset)}</li>`;
+      }).join("");
+      return `<details><summary>${esc(zh ? "查看用量" : "View usage")} · ${esc(labels[overview.state] || labels.unknown)}</summary>${items ? `<ul>${items}</ul>` : `<p class="muted">${esc(labels.unknown)}</p>`}</details>`;
+    };
+    const mySubscriptions = `<section><div class="sec-title"><h3>${esc(words.mySubscriptions)}</h3></div><p class="note">${esc(words.manualBillingMode)}</p>${rideModeControl}<div class="card list">${rides.map((ride: any) => `<div><div class="grow"><b>${esc(ride.pool_name)} · ${esc(ride.tier)} ${esc(zh ? "人档" : "seats")}${ride.current ? ` · ${esc(words.currentRide)}` : ""}</b><small>${esc(words.expires)} ${esc(dfmt(Number(ride.expires_at) * 1000))}${ride.seated ? "" : ` · ${esc(zh ? "尚未分配座位" : "Seat not assigned yet")}`}</small>${rideDetails(ride)}</div>${!ride.current && Number.isSafeInteger(Number(ride.pool_id)) && Number(ride.pool_id) > 0 ? `<button class="btn sm" data-act="set-current-ride" data-id="${esc(ride.pool_id)}">${esc(words.makeCurrentRide)}</button>` : ""}</div>`).join("") || `<div class="muted">${esc(V.subscriptions ? words.notOffered : words.loading)}</div>`}</div></section>`;
     const coupons = V.coupons?.coupons ?? [];
     const couponWallet = `<section><div class="sec-title"><h3>${esc(words.couponWallet)}</h3></div><div class="card list">${coupons.map((coupon: any) => `<div><span class="grow"><b>${esc(coupon.name || coupon.terms || (zh ? "优惠券" : "Coupon"))}</b><small>${esc(coupon.terms || "")} · ${esc(words.couponStatus)}: ${esc(words.couponStates[coupon.state as keyof typeof words.couponStates] || coupon.state)}${coupon.expires_at ? ` · ${esc(words.expires)} ${esc(dfmt(Number(coupon.expires_at) * 1000))}` : ""}</small></span><button class="btn sm" data-act="contact-purchase">${esc(contactPurchase)}</button></div>`).join("") || `<div class="muted">${esc(V.coupons ? words.empty : words.loading)}</div>`}</div></section>`;
     const invoiceFiles = V.invoices?.files ?? [];
