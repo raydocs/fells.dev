@@ -1379,9 +1379,9 @@ async function start(root: HTMLElement, D: any) {
       const windows = Array.isArray(overview.windows) ? overview.windows : [];
       const items = windows.map((w: any) => {
         const value = w.used_pct;
-        const pct = typeof value === "number" && Number.isFinite(value) ? `${Math.max(0, Math.min(100, value)).toFixed(1)}%` : "—";
+        const pct = !w.reset && typeof value === "number" && Number.isFinite(value) ? `${Math.max(0, Math.min(100, value)).toFixed(1)}%` : "—";
         const name = w.scope || (Number(w.window_minutes) === 300 ? (zh ? "5 小时" : "5 hours") : Number(w.window_minutes) === 10080 ? (zh ? "每周" : "Weekly") : w.kind || (zh ? "额度" : "Limit"));
-        const reset = w.reset ? ` · ${zh ? "上一窗口已重置" : "Previous window reset"}` : Number(w.reset_at) > 0 ? ` · ${zh ? "重置" : "Resets"} ${tfmt(Number(w.reset_at) * 1000)}` : "";
+        const reset = w.reset ? ` · ${zh ? "上一窗口已重置，等待新读数" : "Previous window reset; waiting for a new reading"}` : Number(w.reset_at) > 0 ? ` · ${zh ? "重置" : "Resets"} ${tfmt(Number(w.reset_at) * 1000)}` : "";
         return `<li>${esc(name)}: ${esc(pct)}${esc(reset)}</li>`;
       }).join("");
       return `<details><summary>${esc(zh ? "查看用量" : "View usage")} · ${esc(labels[overview.state] || labels.unknown)}</summary>${items ? `<ul>${items}</ul>` : `<p class="muted">${esc(labels.unknown)}</p>`}</details>`;
